@@ -42,3 +42,6 @@ deploy/data/
 # ML model artifacts
 *.zip
 models/
+
+# Rust
+rust/target/
