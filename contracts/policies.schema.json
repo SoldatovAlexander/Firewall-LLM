@@ -1,0 +1,206 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://fwllm.local/schemas/policies.schema.json",
+  "title": "Firewall LLM Policies",
+  "type": "object",
+  "required": ["routing"],
+  "properties": {
+    "routing": {
+      "type": "object",
+      "required": ["default_chain"],
+      "properties": {
+        "default_chain": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/providerRef" },
+          "minItems": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "model_mapping": {
+      "type": "object",
+      "description": "Logical model -> per-provider concrete models",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": { "type": "string" }
+      }
+    },
+    "rules": {
+      "type": "array",
+      "items": { "$ref": "#/definitions/rule" },
+      "default": []
+    },
+    "inspector": {
+      "type": "object",
+      "properties": {
+        "dlp": {
+          "type": "object",
+          "properties": {
+            "mode": { "enum": ["block", "mask", "log", "off"], "default": "mask" },
+            "restore_policy": { "enum": ["restore", "mask"], "default": "mask" },
+            "vault_ttl_seconds": { "type": "integer", "minimum": 1, "default": 3600 },
+            "profiles": { "type": "array", "items": { "type": "string" } }
+          },
+          "additionalProperties": false
+        },
+        "injection": {
+          "type": "object",
+          "properties": {
+            "mode": { "enum": ["block", "log", "off"], "default": "log" },
+            "block_severity_gte": {
+              "enum": ["low", "medium", "high", "critical"],
+              "default": "high"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "egress_proxies": { "$ref": "#/definitions/egressProxies" }
+  },
+  "additionalProperties": false,
+  "definitions": {
+    "providerRef": { "type": "string", "pattern": "^[a-z][a-z0-9_-]*$" },
+    "condition": {
+      "type": "object",
+      "minProperties": 1,
+      "properties": {
+        "provider": { "$ref": "#/definitions/providerRef" },
+        "event": {
+          "enum": [
+            "tokens_spent",
+            "requests_count",
+            "attack_detected",
+            "quota_exceeded",
+            "provider_error",
+            "proxy_rotated",
+            "proxy_failed"
+          ]
+        },
+        "severity": {
+          "oneOf": [
+            { "enum": ["low", "medium", "high", "critical"] },
+            {
+              "type": "object",
+              "minProperties": 1,
+              "properties": {
+                "gt": { "enum": ["low", "medium", "high", "critical"] },
+                "gte": { "enum": ["low", "medium", "high", "critical"] },
+                "lt": { "enum": ["low", "medium", "high", "critical"] },
+                "lte": { "enum": ["low", "medium", "high", "critical"] }
+              },
+              "additionalProperties": false
+            }
+          ]
+        },
+        "requests_per_minute": { "$ref": "#/definitions/threshold" },
+        "provider_tokens_today": { "$ref": "#/definitions/threshold" },
+        "client_tokens_today": { "$ref": "#/definitions/threshold" },
+        "provider_error_rate": { "$ref": "#/definitions/threshold" },
+        "count": { "$ref": "#/definitions/threshold" },
+        "window": { "$ref": "#/definitions/duration" }
+      },
+      "additionalProperties": false
+    },
+    "threshold": {
+      "type": "object",
+      "minProperties": 1,
+      "properties": {
+        "gt": { "type": "number" },
+        "gte": { "type": "number" },
+        "lt": { "type": "number" },
+        "lte": { "type": "number" }
+      },
+      "additionalProperties": false
+    },
+    "duration": {
+      "type": "string",
+      "pattern": "^[0-9]+(ms|s|m|h|d)$"
+    },
+    "rule": {
+      "type": "object",
+      "required": ["name", "when", "action"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "enabled": { "type": "boolean", "default": true },
+        "when": { "$ref": "#/definitions/condition" },
+        "action": { "$ref": "#/definitions/action" }
+      },
+      "additionalProperties": false
+    },
+    "action": {
+      "type": "object",
+      "anyOf": [
+        { "required": ["switch_to"] },
+        { "required": ["switch_default_to"] },
+        { "required": ["next_in_chain"] },
+        { "required": ["block_source"] }
+      ],
+      "properties": {
+        "switch_to": { "$ref": "#/definitions/providerRef" },
+        "switch_default_to": { "$ref": "#/definitions/providerRef" },
+        "next_in_chain": { "const": true },
+        "block_source": { "type": "boolean" },
+        "cooldown": { "$ref": "#/definitions/duration" }
+      },
+      "additionalProperties": false
+    },
+    "egressProxies": {
+      "type": "object",
+      "required": ["pools", "bindings"],
+      "properties": {
+        "pools": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "required": ["proxies", "rotation"],
+            "properties": {
+              "proxies": {
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                  "type": "object",
+                  "required": ["url"],
+                  "properties": {
+                    "url": { "type": "string", "format": "uri" }
+                  },
+                  "additionalProperties": false
+                }
+              },
+              "rotation": {
+                "type": "object",
+                "required": ["strategy"],
+                "properties": {
+                  "strategy": { "enum": ["round_robin", "random", "least_used"] },
+                  "requests_per_proxy": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "default": 100
+                  }
+                },
+                "additionalProperties": false
+              },
+              "healthcheck": {
+                "type": "object",
+                "properties": {
+                  "interval": { "$ref": "#/definitions/duration" },
+                  "fail_threshold": { "type": "integer", "minimum": 1 },
+                  "cooldown": { "$ref": "#/definitions/duration" }
+                },
+                "additionalProperties": false
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "bindings": {
+          "type": "object",
+          "description": "adapter name -> pool name",
+          "additionalProperties": { "type": "string" }
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

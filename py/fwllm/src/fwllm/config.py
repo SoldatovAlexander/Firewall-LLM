@@ -1,0 +1,77 @@
+"""Configuration loading: YAML file + FWLLM_* env overrides + api_key resolution."""
+
+from __future__ import annotations
+
+import os
+from pathlib import Path
+
+import yaml
+from pydantic import BaseModel, Field, ValidationError
+
+
+class ConfigError(Exception):
+    """Raised when configuration is missing, unparsable or invalid."""
+
+
+class ServerConfig(BaseModel):
+    host: str = "127.0.0.1"
+    port: int = 8080
+    request_timeout_seconds: float = 120.0
+
+
+class ProviderConfig(BaseModel):
+    base_url: str
+    api_key_env: str | None = None
+    api_key: str | None = Field(default=None, exclude=True)
+    models: list[str] = Field(default_factory=list)
+
+
+class Config(BaseModel):
+    server: ServerConfig = Field(default_factory=ServerConfig)
+    redis_url: str = "redis://localhost:6379/0"
+    providers: dict[str, ProviderConfig]
+
+    model_config = {"frozen": True}
+
+
+def _resolve_api_keys(cfg: Config) -> Config:
+    data = cfg.model_dump()
+    for name, p in cfg.providers.items():
+        env_var = p.api_key_env
+        if env_var:
+            value = os.environ.get(env_var)
+            if not value:
+                raise ConfigError(
+                    f"config error: environment variable '{env_var}' "
+                    f"(api_key_env of provider '{name}') is not set"
+                )
+            data["providers"][name]["api_key"] = value
+    return Config.model_validate(data)
+
+
+def load_config(path: Path | str) -> Config:
+    path = Path(path)
+    if not path.is_file():
+        raise ConfigError(f"config file not found: {path}")
+    try:
+        raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except yaml.YAMLError as exc:
+        raise ConfigError(f"failed to parse config: {exc}") from exc
+    if not isinstance(raw, dict):
+        raise ConfigError("failed to parse config: top level must be a mapping")
+
+    env_port = os.environ.get("FWLLM_SERVER__PORT")
+    if env_port:
+        raw.setdefault("server", {})["port"] = int(env_port)
+    env_redis = os.environ.get("FWLLM_REDIS_URL")
+    if env_redis:
+        raw["redis_url"] = env_redis
+
+    try:
+        cfg = Config.model_validate(raw)
+    except ValidationError as exc:
+        messages = "; ".join(
+            f"{'.'.join(str(p) for p in e['loc'])}: {e['msg']}" for e in exc.errors()
+        )
+        raise ConfigError(f"invalid config: {messages}") from exc
+    return _resolve_api_keys(cfg)

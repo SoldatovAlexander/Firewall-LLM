@@ -1,0 +1,68 @@
+# Example routing/inspector/egress policy for fwllm.
+# Validated against contracts/policies.schema.json
+
+routing:
+  default_chain: [openrouter, local-ollama]
+
+model_mapping:
+  gpt-4o:
+    openrouter: "meta-llama/llama-3.3-70b-instruct:free"
+    local-ollama: "llama3.3:70b"
+
+rules:
+  - name: token-budget-switch
+    when:
+      provider: openrouter
+      provider_tokens_today: { gt: 5000000 }
+    action:
+      switch_to: local-ollama
+      cooldown: 1h
+
+  - name: rate-switch
+    when:
+      requests_per_minute: { gt: 500 }
+    action:
+      switch_to: local-ollama
+
+  - name: attack-failover
+    when:
+      event: attack_detected
+      severity: { gte: high }
+      count: { gt: 3 }
+      window: 5m
+    action:
+      block_source: true
+      switch_default_to: local-ollama
+
+  - name: health-failover
+    when:
+      provider_error_rate: { gt: 0.1 }
+      window: 60s
+    action:
+      next_in_chain: true
+
+inspector:
+  dlp:
+    mode: mask
+    restore_policy: mask
+    vault_ttl_seconds: 3600
+    profiles: ["ru_152"]
+  injection:
+    mode: block
+    block_severity_gte: high
+
+egress_proxies:
+  pools:
+    openrouter-pool:
+      proxies:
+        - url: "http://proxy1.internal:8080"
+        - url: "http://proxy2.internal:8080"
+      rotation:
+        strategy: round_robin
+        requests_per_proxy: 200
+      healthcheck:
+        interval: 60s
+        fail_threshold: 3
+        cooldown: 5m
+  bindings:
+    openrouter: openrouter-pool
