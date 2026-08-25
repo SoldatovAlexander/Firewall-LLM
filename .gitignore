@@ -32,3 +32,6 @@ config.local.yaml
 
 # Deploy runtime data
 deploy/data/
+
+# Office temp files
+~$*
