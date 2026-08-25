@@ -119,6 +119,12 @@ class RoutingConfig(BaseModel):
     attack_failover: AttackFailoverConfig = Field(default_factory=AttackFailoverConfig)
 
 
+class AuditConfig(BaseModel):
+    enabled: bool = True
+    db_path: str = "audit.db"
+    dlp_redact: bool = True
+
+
 class Config(BaseModel):
     server: ServerConfig = Field(default_factory=ServerConfig)
     redis_url: str = "redis://localhost:6379/0"
@@ -129,6 +135,7 @@ class Config(BaseModel):
     inspectors: InspectorsConfig = Field(default_factory=InspectorsConfig)
     egress: EgressConfig = Field(default_factory=EgressConfig)
     routing: RoutingConfig = Field(default_factory=RoutingConfig)
+    audit: AuditConfig = Field(default_factory=AuditConfig)
 
     model_config = {"frozen": True}
 

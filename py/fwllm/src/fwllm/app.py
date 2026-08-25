@@ -14,6 +14,7 @@ from fastapi.responses import StreamingResponse
 from prometheus_client import make_asgi_app
 from pydantic import BaseModel, Field
 
+from fwllm.audit import AuditLog, ensure_parent
 from fwllm.config import Config
 from fwllm.errors import (
     ApiError,
@@ -90,6 +91,7 @@ def create_app(
     metering: Metering | None = None,
     inspectors: InspectorChain | None = None,
     router: PolicyEngine | None = None,
+    audit_log: AuditLog | None = None,
 ) -> FastAPI:
     app = FastAPI(title="Firewall LLM", version="0.1.0")
     app.state.config = config
@@ -122,6 +124,38 @@ def create_app(
     metering.subscribe(router.on_event)
     inspectors.set_publish(router.on_event)
 
+    if audit_log is None:
+        ensure_parent(config.audit.db_path)
+        audit_log = AuditLog(config.audit)
+    app.state.audit = audit_log
+
+    def _audit_write(
+        *,
+        client: str,
+        provider: str,
+        model: str,
+        code: str,
+        messages: list[dict[str, Any]],
+        response_text: str,
+        prompt_tokens: int = 0,
+        completion_tokens: int = 0,
+    ) -> None:
+        if not audit_log.enabled:
+            return
+        try:
+            audit_log.write(
+                client=client,
+                provider=provider,
+                model=model,
+                code=code,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                messages=messages,
+                response_text=response_text,
+            )
+        except Exception:  # noqa: BLE001
+            logger.warning("audit write failed", exc_info=True)
+
     async def validation_handler(_request: Request, exc: RequestValidationError) -> Any:
         return await validation_error_handler(_request, exc)
 
@@ -137,6 +171,15 @@ def create_app(
     @app.get("/healthz")
     async def healthz() -> dict[str, str]:
         return {"status": "ok"}
+
+    @app.get("/admin/audit")
+    async def admin_audit(
+        client_id: Annotated[str, Depends(_require_client)],
+        code: str | None = None,
+        limit: int = 100,
+    ) -> Any:
+        records = audit_log.search(code=code, limit=min(limit, 1000))
+        return {"total": len(records), "records": records}
 
     @app.post("/v1/chat/completions")
     async def chat_completions(
@@ -162,30 +205,60 @@ def create_app(
             provider_name, concrete_model = router.resolve(body.model, client_id)
         except BlockedError as exc:
             _metrics("blocked")
+            _audit_write(
+                client=client_id,
+                provider="unrouted",
+                model=body.model,
+                code="blocked_source",
+                messages=body.model_dump()["messages"],
+                response_text=str(exc),
+            )
             raise blocked_error(str(exc), reason=exc.reason) from exc
         payload["model"] = concrete_model
         provider = app.state.providers.get(provider_name)
         if provider is None:
             raise upstream_error(f"routed provider '{provider_name}' not configured")
 
+        def _audit_now(
+            code: str,
+            response_text: str,
+            prompt_tokens: int = 0,
+            completion_tokens: int = 0,
+            messages: list[dict[str, Any]] | None = None,
+        ) -> None:
+            _audit_write(
+                client=client_id,
+                provider=provider_name,
+                model=body.model,
+                code=code,
+                messages=payload.get("messages", []) if messages is None else messages,
+                response_text=response_text,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+            )
+
         if not body.stream:
             try:
                 ctx = inspectors.process_request(payload, client=client_id)
             except BlockedError as exc:
                 _metrics("blocked")
+                _audit_now("blocked", str(exc), messages=body.model_dump()["messages"])
                 raise blocked_error(str(exc), reason=exc.reason) from exc
             try:
                 await _metering_safe(metering.check_client(client_id))
             except QuotaExceeded as exc:
                 _metrics("rate_limited")
+                _audit_now("rate_limited", str(exc))
                 raise rate_limit_error(str(exc)) from exc
             try:
                 result = await provider.chat(payload)
             except BlockedError as exc:
                 _metrics("blocked")
+                _audit_now("blocked", str(exc))
                 raise blocked_error(str(exc), reason=exc.reason) from exc
             except ProviderError as exc:
                 _metrics("upstream_error")
+                _audit_now("upstream_error", str(exc))
                 raise upstream_error(str(exc)) from exc
             result = inspectors.process_response(result, ctx)
             if concrete_model != body.model:
@@ -202,13 +275,26 @@ def create_app(
                     completion=completion_tokens,
                 )
             )
+            response_text = "\n".join(
+                choice.get("message", {}).get("content") or ""
+                for choice in result.get("choices", [])
+            )
+            _audit_now("ok", response_text, prompt_tokens, completion_tokens)
             _metrics("ok", prompt=prompt_tokens, completion=completion_tokens)
             return result
 
         async def sse() -> AsyncIterator[str]:
             code = "ok"
+            response_parts: list[str] = []
             try:
                 async for chunk in provider.chat_stream(payload):
+                    delta = (
+                        chunk.get("choices", [{}])[0].get("delta", {}).get("content")
+                        if isinstance(chunk, dict)
+                        else None
+                    )
+                    if isinstance(delta, str):
+                        response_parts.append(delta)
                     yield f"data: {json.dumps(chunk, separators=(',', ':'))}\n\n"
             except BlockedError as exc:
                 code = "blocked"
@@ -222,6 +308,7 @@ def create_app(
                 return
             finally:
                 _metrics(code)
+                _audit_now(code, "".join(response_parts))
             yield "data: [DONE]\n\n"
 
         return StreamingResponse(sse(), media_type="text/event-stream")
