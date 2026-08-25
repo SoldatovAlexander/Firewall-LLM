@@ -14,6 +14,7 @@ providers:
     api_key_env: OPENROUTER_API_KEY
 
 routing:
+  state_store: redis          # memory | redis (survives restarts)
   default_chain: [openrouter]
   attack_failover:
     enabled: true

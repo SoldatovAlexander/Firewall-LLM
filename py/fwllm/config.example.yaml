@@ -28,6 +28,7 @@ quotas:
   client_requests_per_day: 1000
 
 routing:
+  state_store: redis          # memory | redis (survives restarts)
   default_chain: [openrouter, local-ollama]
   model_mapping:
     gpt-4o:

@@ -117,6 +117,8 @@ class RoutingConfig(BaseModel):
     model_mapping: dict[str, dict[str, str]] = Field(default_factory=dict)
     rules: list[RoutingRule] = Field(default_factory=list)
     attack_failover: AttackFailoverConfig = Field(default_factory=AttackFailoverConfig)
+    # memory: state lost on restart; redis: survives restarts (uses redis_url)
+    state_store: Literal["memory", "redis"] = "memory"
 
 
 class AuditConfig(BaseModel):

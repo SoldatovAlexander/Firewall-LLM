@@ -85,6 +85,14 @@ async def _require_client(request: Request) -> str:
     return clients.get(token, token)
 
 
+def _build_redis_store(url: str) -> Any:
+    import redis as redis_sync
+
+    from fwllm.router.store import RedisRouterStore
+
+    return RedisRouterStore(redis_sync.from_url(url, decode_responses=True))
+
+
 def create_app(
     config: Config,
     providers: dict[str, Provider] | None = None,
@@ -119,7 +127,12 @@ def create_app(
                 update={"default_chain": list(providers.keys())}
             )
         PolicyEngine.validate_routing(routing, list(providers.keys()))
-        router = PolicyEngine(routing)
+        store = (
+            _build_redis_store(config.redis_url)
+            if routing.state_store == "redis"
+            else None
+        )
+        router = PolicyEngine(routing, store=store)
     app.state.router = router
     metering.subscribe(router.on_event)
     inspectors.set_publish(router.on_event)
