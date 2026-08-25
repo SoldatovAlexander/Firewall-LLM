@@ -4,7 +4,7 @@ Security gateway for LLM traffic: token spend control, data-leak prevention, pro
 
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
 ![Rust](https://img.shields.io/badge/production-gateway-orange)
-![License](https://img.shields.io/badge/license-TBD-lightgrey)
+![License](https://img.shields.io/badge/license-FSL--1.1--MIT-blue)
 ![Deployment](https://img.shields.io/badge/deployment-on--prem-red)
 
 ## Project Description / Описание проекта
@@ -157,6 +157,11 @@ provider mid-flight; attack bursts block the source and fail the chain over.
 
 ## License
 
-Open-core: gateway core will be released under a source-available license
-(FSL/BSL or AGPL — TBD before first public release). Enterprise modules
-(ML detectors, UI, SIEM integrations, HA) are commercial.
+Core is licensed under the [Functional Source License, Version 1.1, MIT Future
+License](LICENSE) (FSL-1.1-MIT): you may use, study, modify and redistribute the
+software for any purpose **except** competing with the producer as an LLM
+security gateway. Two years after each version is published, it automatically
+becomes MIT-licensed.
+
+Enterprise modules (multi-pool proxy rotation, trained ML detectors, UI,
+SIEM integrations, HA) are commercial and licensed separately.
