@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from fwllm.config import InspectorsConfig
+from fwllm.config import ConfigError, InspectorsConfig
 from fwllm.inspectors.dlp import DLPInspector
 from fwllm.inspectors.injection import InjectionInspector
 from fwllm.metering import Event
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -41,15 +44,35 @@ class InspectorChain:
 
     @classmethod
     def from_config(
-        cls, config: InspectorsConfig, publish: Callable[[Event], None] | None = None
+        cls,
+        config: InspectorsConfig,
+        publish: Callable[[Event], None] | None = None,
+        ml_classifier: Any | None = None,
+        ml_model_dir: str | None = None,
     ) -> InspectorChain:
-        return cls(
-            [
-                InjectionInspector(config.injection, publish=publish),
-                DLPInspector(config.dlp, publish=publish),
-            ],
-            publish=publish,
-        )
+        inspectors: list[Any] = [
+            InjectionInspector(config.injection, publish=publish)
+        ]
+        if config.injection.ml.enabled:
+            classifier = ml_classifier
+            if classifier is None:
+                from fwllm_enterprise.ml_injection import try_load_classifier
+
+                classifier = try_load_classifier(
+                    ml_model_dir or config.injection.ml.model_dir
+                )
+            if classifier is None:
+                raise ConfigError(
+                    "injection.ml is enabled but no model could be loaded - "
+                    "provide a valid model_dir with model.onnx/tokenizer.json"
+                )
+            from fwllm_enterprise.ml_injection import MLInjectionInspector
+
+            inspectors.append(
+                MLInjectionInspector(classifier, config.injection, publish=publish)
+            )
+        inspectors.append(DLPInspector(config.dlp, publish=publish))
+        return cls(inspectors, publish=publish)
 
     def set_publish(self, publish: Callable[[Event], None] | None) -> None:
         """Re-wire event publishing (used by gateway to feed the policy engine)."""

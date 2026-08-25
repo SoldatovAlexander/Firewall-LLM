@@ -51,7 +51,7 @@ select = ["E", "F", "I", "UP", "B", "S"]
 "tests/*" = ["S101"]
 
 [tool.mypy]
-python_version = "3.11"
+python_version = "3.12"
 strict = true
 
 [[tool.mypy.overrides]]

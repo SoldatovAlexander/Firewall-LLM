@@ -44,9 +44,18 @@ class DLPConfig(BaseModel):
     profile: str = "ru_152"
 
 
+class MLModelConfig(BaseModel):
+    """Local ONNX injection classifier (enterprise module required)."""
+
+    enabled: bool = False
+    model_dir: str = ""
+    threshold: float = Field(default=0.6, ge=0.0, le=1.0)
+
+
 class InjectionConfig(BaseModel):
     mode: Literal["block", "log", "off"] = "block"
     block_severity_gte: Literal["low", "medium", "high", "critical"] = "high"
+    ml: MLModelConfig = Field(default_factory=MLModelConfig)
 
 
 class InspectorsConfig(BaseModel):
