@@ -20,7 +20,8 @@ Security gateway for LLM traffic: token spend control, data-leak prevention, pro
 - DLP masking via [LightAnon](https://github.com/SoldatovAlexander/lightanon_project): reversible sanitization of prompts, `ru_152` compliance profile.
 - Signature-based prompt injection detection with severity-based blocking.
 - DLP masking via [LightAnon](https://github.com/SoldatovAlexander/lightanon_project): reversible sanitization of prompts, `ru_152` compliance profile.
-- Egress control (open core): all adapters **direct** or through **one global proxy**. Multi-pool rotation by request count, per-adapter bindings and healthchecks are enterprise features.
+- Egress control (open core): all adapters **direct** or through **one global proxy**.
+- Enterprise: multi-pool egress proxies with rotation by request count (round_robin / random / least_used), failure thresholds and cooldowns, per-adapter bindings (`fwllm-enterprise` package).
 - Prometheus metrics + dashboard import into an existing Grafana instance.
 - Declarative YAML policies (`contracts/policies.schema.json`), hot reload.
 - Full audit log with PII redaction.

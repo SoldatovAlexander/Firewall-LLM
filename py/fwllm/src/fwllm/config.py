@@ -54,17 +54,46 @@ class InspectorsConfig(BaseModel):
     injection: InjectionConfig = Field(default_factory=InjectionConfig)
 
 
-class EgressConfig(BaseModel):
-    """Outbound policy. MVP: direct or one global proxy (pools are enterprise)."""
+class PoolConfig(BaseModel):
+    proxies: list[str] = Field(min_length=1)
+    rotation: Literal["round_robin", "random", "least_used"] = "round_robin"
+    requests_per_proxy: int = Field(default=100, ge=1)
+    fail_threshold: int = Field(default=3, ge=1)
+    cooldown_seconds: int = Field(default=300, ge=1)
 
-    mode: Literal["direct", "single_proxy"] = "direct"
+
+class EgressConfig(BaseModel):
+    """Outbound policy.
+
+    Open core: direct or one global proxy.
+    Enterprise: mode=pools with per-adapter bindings and rotation.
+    """
+
+    mode: Literal["direct", "single_proxy", "pools"] = "direct"
     proxy_url: str | None = None
+    pools: dict[str, PoolConfig] = Field(default_factory=dict)
+    bindings: dict[str, str] = Field(default_factory=dict)
 
     @pydantic.model_validator(mode="after")
-    def _proxy_required_in_single_mode(self) -> EgressConfig:
+    def _validate(self) -> EgressConfig:
         if self.mode == "single_proxy" and not self.proxy_url:
             raise ValueError("egress.single_proxy requires proxy_url")
+        if self.mode == "pools":
+            if not self.pools:
+                raise ValueError("egress.pools requires at least one pool")
+            for adapter, pool in self.bindings.items():
+                if pool not in self.pools:
+                    raise ValueError(
+                        f"binding '{adapter}' references unknown pool '{pool}'"
+                    )
         return self
+
+
+def validate_bindings(cfg: EgressConfig) -> None:
+    """Explicit validation helper (raises ValueError on bad bindings)."""
+    for adapter, pool in cfg.bindings.items():
+        if pool not in cfg.pools:
+            raise ValueError(f"binding '{adapter}' references unknown pool '{pool}'")
 
 
 class Threshold(BaseModel):
