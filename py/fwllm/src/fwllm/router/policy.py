@@ -2,15 +2,21 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from datetime import UTC, datetime
+from typing import TypeVar
 
 from fwllm.config import AttackFailoverConfig, ConfigError, RoutingConfig, RoutingRule
 from fwllm.metering import Event
 from fwllm.providers.base import BlockedError
 from fwllm.router.store import InMemoryRouterStore, RouterStateStore
 
+logger = logging.getLogger(__name__)
+
 _SEVERITY: dict[str, int] = {"low": 0, "medium": 1, "high": 2, "critical": 3}
+
+_T = TypeVar("_T")
 
 
 def _default_clock() -> datetime:
@@ -55,14 +61,25 @@ class PolicyEngine:
     def _now_ts(self) -> float:
         return self._clock().timestamp()
 
+    def _safe(self, fn: Callable[[], _T], default: _T) -> _T:
+        """State store outages must not break traffic (fail-open)."""
+        try:
+            return fn()
+        except Exception:  # noqa: BLE001
+            logger.warning("router state store unavailable, failing open")
+            return default
+
     def provider_tokens_today(self, provider: str) -> int:
-        return self._store.get_tokens((provider, self._day()))
+        return self._safe(
+            lambda: self._store.get_tokens((provider, self._day())), 0
+        )
 
     def on_event(self, event: Event) -> None:
         if event.name == "tokens_spent":
             provider = str(event.data.get("provider", ""))
             amount = int(event.data.get("total_tokens", 0))
-            self._store.incr_tokens((provider, self._day()), amount)
+            day = self._day()
+            self._safe(lambda: self._store.incr_tokens((provider, day), amount), None)
             return
         af: AttackFailoverConfig = self._routing.attack_failover
         if not af.enabled or event.name != "attack_detected":
@@ -81,19 +98,24 @@ class PolicyEngine:
             return
         del self._attack_times[:]  # window consumed - one reaction per burst
         if af.block_source and source:
-            self._store.block_source(source, now.timestamp() + af.block_ttl_seconds)
+            until = now.timestamp() + af.block_ttl_seconds
+            self._safe(lambda: self._store.block_source(source, until), None)
         if af.switch_to:
-            self._store.set_override(af.switch_to, now.timestamp() + af.cooldown_seconds)
+            cooldown_until = now.timestamp() + af.cooldown_seconds
+            switch_provider = af.switch_to
+            self._safe(
+                lambda: self._store.set_override(switch_provider, cooldown_until), None
+            )
 
     def _chain_candidates(self) -> list[str]:
         chain = list(self._routing.default_chain) or ["default"]
-        override = self._store.get_override()
+        override = self._safe(self._store.get_override, None)
         if override is None:
             return chain
         provider, until_ts = override
         if self._now_ts() < until_ts:
             return [provider] + [p for p in chain if p != provider]
-        self._store.clear_override()  # cooldown expired
+        self._safe(self._store.clear_override, None)  # cooldown expired
         return chain
 
     def _violates_rule(self, provider: str, rule: RoutingRule) -> bool:
@@ -108,7 +130,7 @@ class PolicyEngine:
 
     def resolve(self, requested_model: str, client_id: str) -> tuple[str, str]:
         now_ts = self._now_ts()
-        if self._store.is_blocked(client_id, now_ts):
+        if self._safe(lambda: self._store.is_blocked(client_id, now_ts), False):
             raise BlockedError(
                 "request source is temporarily blocked", reason="blocked_source"
             )

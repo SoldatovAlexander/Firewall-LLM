@@ -1,4 +1,9 @@
 services:
+  redis:
+    image: redis:7-alpine
+    container_name: fwllm-redis
+    restart: unless-stopped
+
   gateway:
     build: ./gateway
     container_name: fwllm-gateway
