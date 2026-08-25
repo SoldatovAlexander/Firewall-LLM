@@ -30,6 +30,8 @@ class Config(BaseModel):
     server: ServerConfig = Field(default_factory=ServerConfig)
     redis_url: str = "redis://localhost:6379/0"
     providers: dict[str, ProviderConfig]
+    # client API token -> label
+    clients: dict[str, str] = Field(default_factory=dict)
 
     model_config = {"frozen": True}
 
