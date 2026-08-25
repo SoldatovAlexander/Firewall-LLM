@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-import httpx
-
 from fwllm.adapters.ollama import OllamaAdapter
 from fwllm.adapters.openai_compat import OpenAICompatAdapter
 from fwllm.adapters.openrouter import OpenRouterAdapter
 from fwllm.config import Config, ConfigError
+from fwllm.egress import build_http_client
 from fwllm.providers.base import Provider
 
 _ADAPTERS: dict[str, type[OpenAICompatAdapter]] = {
@@ -24,7 +23,11 @@ def build_providers(config: Config) -> dict[str, Provider]:
         cls = _ADAPTERS.get(pcfg.type)
         if cls is None:
             raise ConfigError(f"unknown provider type '{pcfg.type}' for provider '{name}'")
-        client = httpx.AsyncClient(base_url=pcfg.base_url)
+        client = build_http_client(
+            pcfg.base_url,
+            config.egress.proxy_url if config.egress.mode == "single_proxy" else None,
+            timeout=config.server.request_timeout_seconds,
+        )
         providers[name] = cls(
             client=client,
             api_key=pcfg.api_key,

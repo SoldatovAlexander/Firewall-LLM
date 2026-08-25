@@ -18,8 +18,9 @@ Security gateway for LLM traffic: token spend control, data-leak prevention, pro
 - One adapter per external LLM API: OpenRouter, OpenAI, Anthropic, Ollama/vLLM.
 - Provider switching by policy: tokens spent, requests count, attack detection, error rate.
 - DLP masking via [LightAnon](https://github.com/SoldatovAlexander/lightanon_project): reversible sanitization of prompts, `ru_152` compliance profile.
-- Prompt injection detection with severity-based blocking.
-- Egress proxy pools bound to adapters, rotation by configurable request count.
+- Signature-based prompt injection detection with severity-based blocking.
+- DLP masking via [LightAnon](https://github.com/SoldatovAlexander/lightanon_project): reversible sanitization of prompts, `ru_152` compliance profile.
+- Egress control (open core): all adapters **direct** or through **one global proxy**. Multi-pool rotation by request count, per-adapter bindings and healthchecks are enterprise features.
 - Prometheus metrics + dashboard import into an existing Grafana instance.
 - Declarative YAML policies (`contracts/policies.schema.json`), hot reload.
 - Full audit log with PII redaction.
@@ -123,9 +124,9 @@ mypy src                           # type check
 
 | Milestone | Scope | Status |
 |---|---|---|
-| M1 | Proxy to free models (gateway + adapters) | in progress |
-| M2 | Token metering + Grafana dashboard | planned |
-| M3 | Security: DLP/injection + egress proxy pool | planned |
+| M1 | Proxy to free models (gateway + adapters) | done |
+| M2 | Token metering + Grafana dashboard | done |
+| M3 | Security: DLP/injection + egress control | done |
 | M4 | Auto provider switching + audit log — MVP complete | planned |
 
 ## License

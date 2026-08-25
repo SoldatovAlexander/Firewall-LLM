@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 from typing import Literal
 
+import pydantic
 import yaml
 from pydantic import BaseModel, Field, ValidationError
 
@@ -53,6 +54,19 @@ class InspectorsConfig(BaseModel):
     injection: InjectionConfig = Field(default_factory=InjectionConfig)
 
 
+class EgressConfig(BaseModel):
+    """Outbound policy. MVP: direct or one global proxy (pools are enterprise)."""
+
+    mode: Literal["direct", "single_proxy"] = "direct"
+    proxy_url: str | None = None
+
+    @pydantic.model_validator(mode="after")
+    def _proxy_required_in_single_mode(self) -> EgressConfig:
+        if self.mode == "single_proxy" and not self.proxy_url:
+            raise ValueError("egress.single_proxy requires proxy_url")
+        return self
+
+
 class Config(BaseModel):
     server: ServerConfig = Field(default_factory=ServerConfig)
     redis_url: str = "redis://localhost:6379/0"
@@ -61,6 +75,7 @@ class Config(BaseModel):
     clients: dict[str, str] = Field(default_factory=dict)
     quotas: Quotas = Field(default_factory=Quotas)
     inspectors: InspectorsConfig = Field(default_factory=InspectorsConfig)
+    egress: EgressConfig = Field(default_factory=EgressConfig)
 
     model_config = {"frozen": True}
 
