@@ -15,6 +15,7 @@ services:
       FWLLM_CONFIG: /etc/fwllm/fwllm.yaml
     volumes:
       - ./fwllm.yaml:/etc/fwllm/fwllm.yaml:ro
+      - ./models:/models:ro
       - ./data:/data
 
   prometheus:

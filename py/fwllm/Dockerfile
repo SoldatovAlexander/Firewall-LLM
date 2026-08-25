@@ -8,9 +8,11 @@ WORKDIR /app
 
 COPY pyproject.toml ./
 COPY src ./src
+COPY enterprise ./enterprise
 # rtcompat: CPU-compatible polars build for servers without AVX2
 RUN pip install --no-cache-dir "polars[rtcompat]" \
-    && pip install --no-cache-dir .
+    && pip install --no-cache-dir onnxruntime tokenizers \
+    && pip install --no-cache-dir . ./enterprise
 
 ENV POLARS_SKIP_CPU_CHECK=1
 

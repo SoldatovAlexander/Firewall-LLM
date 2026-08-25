@@ -38,3 +38,7 @@ deploy/data/
 
 # runtime artifacts
 *.db
+
+# ML model artifacts
+*.zip
+models/
