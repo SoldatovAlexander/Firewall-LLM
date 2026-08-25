@@ -21,6 +21,7 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 thiserror = { workspace = true }
 bytes = "1"
+redis = { version = "0.27", default-features = false, features = ["script"] }
 futures-util = { workspace = true }
 tokio-util = { workspace = true }
 

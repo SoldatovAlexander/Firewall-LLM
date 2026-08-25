@@ -11,10 +11,20 @@ pub struct AppState {
     pub clients: BTreeMap<String, String>,
     pub providers: Arc<ProviderRegistry>,
     pub router: tokio::sync::Mutex<crate::router::PolicyEngine>,
+    /// None when redis is unreachable at startup (fail-open accounting).
+    pub metering: Option<crate::metering::Metering>,
 }
 
 impl AppState {
     pub fn new(config: Config, providers: Option<Arc<ProviderRegistry>>) -> Arc<Self> {
+        Self::new_with_metering(config, providers, None)
+    }
+
+    pub fn new_with_metering(
+        config: Config,
+        providers: Option<Arc<ProviderRegistry>>,
+        metering_override: Option<crate::metering::Metering>,
+    ) -> Arc<Self> {
         let registry = providers.unwrap_or_else(|| {
             let mut map = ProviderRegistry::new();
             let timeout =
@@ -56,11 +66,18 @@ impl AppState {
             panic!("{msg}");
         }
 
+        let metering = metering_override.or_else(|| {
+            crate::metering::RedisStore::new(&config.redis_url)
+                .ok()
+                .map(|store| crate::metering::Metering::new(Box::new(store), &config.quotas))
+        });
+
         Arc::new(Self {
             clients: config.clients.clone(),
             config,
             providers: registry,
             router: tokio::sync::Mutex::new(crate::router::PolicyEngine::new(routing)),
+            metering,
         })
     }
 }

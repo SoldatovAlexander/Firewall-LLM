@@ -1,6 +1,7 @@
 //! fwllm-gateway: production Rust gateway (axum).
 
 pub mod error;
+pub mod metering;
 pub mod metrics;
 pub mod providers;
 pub mod router;
@@ -29,7 +30,15 @@ pub fn build_app(
     config: Config,
     providers: Option<Arc<providers::ProviderRegistry>>,
 ) -> Router {
-    let state = AppState::new(config, providers);
+    build_app_with_metering(config, providers, None)
+}
+
+pub fn build_app_with_metering(
+    config: Config,
+    providers: Option<Arc<providers::ProviderRegistry>>,
+    metering: Option<metering::Metering>,
+) -> Router {
+    let state = AppState::new_with_metering(config, providers, metering);
     Router::new()
         .route("/healthz", get(healthz))
         .route("/v1/chat/completions", post(chat_completions))
@@ -198,14 +207,31 @@ async fn chat_completions(
     }
 
     let started = Instant::now();
-    let code_for =
-        |code: &'static str| (client_id.clone(), provider_name.clone(), body.model.clone(), code);
+
+    // quota gate -> 429
+    if let Some(metering) = &state.metering {
+        if let Err(quota_err) = metering.check_client(&client_id) {
+            metrics::observe_request(&client_id, &provider_name, &body.model, "rate_limited", 0.0, 0, 0);
+            return ApiError::rate_limited(format!(
+                "daily {} quota exceeded ({}/{})",
+                quota_err.scope, 0, quota_err.limit
+            ))
+            .into_response();
+        }
+    }
 
     let provider = match state.providers.get(&provider_name) {
         Some(p) => p.clone(),
         None => {
-            let c = code_for("upstream_error");
-            metrics::observe_request(&c.0, &c.1, &c.2, c.3, 0.0, 0, 0);
+            metrics::observe_request(
+                &client_id,
+                &provider_name,
+                &body.model,
+                "upstream_error",
+                0.0,
+                0,
+                0,
+            );
             return ApiError::upstream(format!(
                 "routed provider '{provider_name}' not configured"
             ))
@@ -253,6 +279,15 @@ async fn chat_completions(
                 prompt,
                 done,
             );
+            if let Some(metering) = &state.metering {
+                metering.record(
+                    &client_id,
+                    &provider_name,
+                    &body.model,
+                    prompt as i64,
+                    done as i64,
+                );
+            }
             (StatusCode::OK, Json(completion)).into_response()
         }
         Err(err) => {
