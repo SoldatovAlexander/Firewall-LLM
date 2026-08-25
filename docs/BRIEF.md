@@ -141,7 +141,7 @@ egress_proxies:
 | Компонент | Выбор |
 |---|---|
 | MVP-ветка | **Python 3.11+, FastAPI, httpx, redis, prometheus-client, lightanon** |
-| Вторая ветка | Go (production gateway; контракты общие с Python) |
+| Вторая ветка | **Rust** (production gateway: axum/hyper, низкие задержки; контракты общие с Python) |
 | Контракты | OpenAPI unified API + JSON Schema политик (единые для обеих веток) |
 | Хранилища | PostgreSQL (логи, состояние), Redis (квоты, routing state) |
 | Наблюдаемость | Prometheus + Grafana (существующий инстанс) |
@@ -199,7 +199,7 @@ DLP (NER, классификация данных), UI управления, SIE
 
 | Риск/вопрос | Митигация/статус |
 |---|---|
-| Расхождение Python/Go веток | Единые контракты + контрактные тесты до реализации |
+| Расхождение Python/Rust веток | Единые контракты + контрактные тесты до реализации |
 | Vault LightAnon при стриминге | Отдельная задача фазы 5: чанковый restore |
 | Прокси без HTTPS CONNECT | Проверка поддержки на этапе healthcheck |
 | Лицензия не выбрана | Решить до первого публичного push (FSL vs AGPL) |
