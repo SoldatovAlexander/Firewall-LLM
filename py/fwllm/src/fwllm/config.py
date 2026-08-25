@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import Literal
 
 import yaml
 from pydantic import BaseModel, Field, ValidationError
@@ -13,6 +14,9 @@ class ConfigError(Exception):
     """Raised when configuration is missing, unparsable or invalid."""
 
 
+ProviderType = Literal["openai_compat", "openrouter", "ollama"]
+
+
 class ServerConfig(BaseModel):
     host: str = "127.0.0.1"
     port: int = 8080
@@ -20,6 +24,7 @@ class ServerConfig(BaseModel):
 
 
 class ProviderConfig(BaseModel):
+    type: ProviderType = "openai_compat"
     base_url: str
     api_key_env: str | None = None
     api_key: str | None = Field(default=None, exclude=True)
