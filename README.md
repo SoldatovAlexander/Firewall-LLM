@@ -177,12 +177,7 @@ cargo test --workspace
 cargo clippy --all-targets -- -D warnings
 ```
 
-Training notebook for the ONNX injection classifier:
-[`docs/notebooks/train_injection_model.ipynb`](docs/notebooks/train_injection_model.ipynb)
-(Google Colab, free T4 is sufficient).
-
 ## Documentation
-- Project brief: [`docs/BRIEF.md`](docs/BRIEF.md) ([.docx](docs/BRIEF.docx))
 - Unified API contract: [`contracts/openapi.yaml`](contracts/openapi.yaml)
 - Policies schema: [`contracts/policies.schema.json`](contracts/policies.schema.json)
 - Example policy: [`contracts/policy.example.yaml`](contracts/policy.example.yaml)

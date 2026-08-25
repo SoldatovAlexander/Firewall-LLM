@@ -45,3 +45,6 @@ models/
 
 # Rust
 rust/target/
+
+# training notebook - local only, not published
+docs/notebooks/
