@@ -2,7 +2,7 @@
 
 use axum::body::Body;
 use tower::ServiceExt;
-use fwllm_gateway::providers::{Provider, ProviderError};
+use fwllm_gateway::providers::{ChatFuture, Provider, ProviderError};
 use http_body_util::BodyExt;
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -15,6 +15,9 @@ const CLIENT_KEY: &str = "secret-client-key";
 fn auth_header() -> (&'static str, String) {
     ("authorization", format!("Bearer {CLIENT_KEY}"))
 }
+
+use futures_util::Stream;
+use fwllm_gateway::providers::StreamFuture;
 
 struct FakeProvider {
     fail: bool,
@@ -235,4 +238,95 @@ routing:
     assert_eq!(res.status(), 200);
     let body = body_json(res).await;
     assert_eq!(body["routed_from"], "gpt-4o");
+}
+
+#[tokio::test]
+async fn streaming_sse_chunks_and_done() {
+    struct StreamingFake;
+
+    impl Provider for StreamingFake {
+        fn chat(&self, _p: Value) -> ChatFuture {
+            unreachable!()
+        }
+        fn chat_stream(&self, _p: Value) -> StreamFuture {
+            use futures_util::stream;
+            Box::pin(async move {
+                let items: Vec<Result<Value, ProviderError>> = vec![
+                    Ok(json!({"choices":[{"delta":{"content":"Hel"}}]})),
+                    Ok(json!({"choices":[{"delta":{"content":"lo!"}}]})),
+                ];
+                Ok(Box::pin(stream::iter(items))
+                    as Pin<Box<dyn Stream<Item = Result<Value, ProviderError>> + Send>>)
+            })
+        }
+    }
+
+    let cfg = base_config(None);
+    let mut providers: HashMap<String, Arc<dyn Provider>> = HashMap::new();
+    providers.insert("primary".into(), Arc::new(StreamingFake));
+    providers.insert("backup".into(), Arc::new(StreamingFake));
+
+    let res = fwllm_gateway::build_app(cfg, Some(Arc::new(providers)))
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header(auth_header().0, auth_header().1)
+                .body(Body::from(
+                    r#"{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}],"stream":true}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(res.status(), 200);
+    assert!(res
+        .headers()
+        .get("content-type")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .starts_with("text/event-stream"));
+    let bytes = res.into_body().collect().await.unwrap().to_bytes();
+    let text = String::from_utf8(bytes.to_vec()).unwrap();
+    assert!(text.ends_with("data: [DONE]\n\n"));
+    assert!(text.contains("Hel"));
+    assert!(text.contains("lo!"));
+}
+
+#[tokio::test]
+async fn stream_open_failure_maps_to_502() {
+    struct FailingStream;
+
+    impl Provider for FailingStream {
+        fn chat(&self, _p: Value) -> ChatFuture {
+            unreachable!()
+        }
+        fn chat_stream(&self, _p: Value) -> StreamFuture {
+            Box::pin(async move { Err(ProviderError::Connection("boom".into())) })
+        }
+    }
+
+    let cfg = base_config(None);
+    let mut providers: HashMap<String, Arc<dyn Provider>> = HashMap::new();
+    providers.insert("primary".into(), Arc::new(FailingStream));
+    providers.insert("backup".into(), Arc::new(FailingStream));
+
+    let res = fwllm_gateway::build_app(cfg, Some(Arc::new(providers)))
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header(auth_header().0, auth_header().1)
+                .body(Body::from(
+                    r#"{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}],"stream":true}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 502);
 }

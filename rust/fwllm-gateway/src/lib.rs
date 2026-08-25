@@ -8,6 +8,8 @@ pub mod state;
 
 use crate::error::ApiError;
 use crate::state::AppState;
+use axum::body::Body;
+use bytes::Bytes;
 use axum::extract::{rejection::JsonRejection, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -41,6 +43,82 @@ async fn metrics_handler() -> String {
 
 async fn healthz() -> Json<Value> {
     Json(json!({"status": "ok"}))
+}
+
+/// SSE passthrough: chunks from the provider are re-emitted as
+/// `data: {...}\n\n` lines terminated by `data: [DONE]`.
+#[allow(clippy::too_many_arguments)]
+async fn stream_response(
+    _state: &Arc<AppState>,
+    client_id: &str,
+    provider_name: &str,
+    model: &str,
+    provider: Arc<dyn providers::Provider>,
+    payload: Value,
+    started: Instant,
+) -> Response {
+    let client_id = client_id.to_string();
+    let provider_name = provider_name.to_string();
+    let model = model.to_string();
+    match provider.chat_stream(payload).await {
+        Ok(stream) => {
+            use futures_util::StreamExt;
+            let client = client_id.to_string();
+            let provider_tag = provider_name.to_string();
+            let model_tag = model.to_string();
+            let mapped = stream.map(move |item| match item {
+                Ok(chunk) => Ok::<Bytes, std::convert::Infallible>(Bytes::from(format!(
+                    "data: {}\n\n",
+                    chunk
+                ))),
+                Err(err) => {
+                    metrics::observe_request(
+                        &client,
+                        &provider_tag,
+                        &model_tag,
+                        "upstream_error",
+                        started.elapsed().as_secs_f64(),
+                        0,
+                        0,
+                    );
+                    Ok(Bytes::from(format!(
+                        "data: {}\n\n",
+                        json!({"error": {"message": err.to_string(), "type": "upstream_error"}})
+                    )))
+                }
+            });
+            let with_done =
+                mapped.chain(futures_util::stream::once(async move {
+                    metrics::observe_request(
+                        &client_id,
+                        &provider_name,
+                        &model,
+                        "ok",
+                        started.elapsed().as_secs_f64(),
+                        0,
+                        0,
+                    );
+                    Ok::<Bytes, std::convert::Infallible>(Bytes::from("data: [DONE]\n\n"))
+                }));
+            Response::builder()
+                .status(StatusCode::OK)
+                .header("content-type", "text/event-stream")
+                .body(Body::from_stream(with_done))
+                .unwrap()
+        }
+        Err(err) => {
+            metrics::observe_request(
+                &client_id,
+                &provider_name,
+                &model,
+                "upstream_error",
+                started.elapsed().as_secs_f64(),
+                0,
+                0,
+            );
+            ApiError::upstream(err.to_string()).into_response()
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -136,10 +214,15 @@ async fn chat_completions(
     };
 
     if body.stream {
-        return ApiError::invalid_request(
-            "streaming is not yet supported by the Rust gateway",
-        )
-        .into_response();
+        let payload = json!({
+            "model": concrete_model,
+            "messages": body.messages.iter()
+                .map(|m| json!({"role": m.role, "content": m.content}))
+                .collect::<Vec<_>>(),
+            "stream": true,
+        });
+        return stream_response(&state, &client_id, &provider_name, &body.model, provider, payload, started)
+            .await;
     }
 
     let mut payload = json!({

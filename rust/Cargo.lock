@@ -291,6 +291,8 @@ name = "fwllm-gateway"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "bytes",
+ "futures-util",
  "fwllm-core",
  "http-body-util",
  "prometheus",
@@ -301,6 +303,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
+ "tokio-util",
  "tower",
  "tracing",
  "tracing-subscriber",
