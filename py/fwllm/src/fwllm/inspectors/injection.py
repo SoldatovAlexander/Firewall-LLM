@@ -64,10 +64,12 @@ class InjectionInspector:
                     findings.append((name, severity))
         return findings
 
-    def process_request(self, payload: dict[str, Any]) -> None:
-        self.inspect_messages(payload.get("messages", []))
+    def process_request(self, payload: dict[str, Any], client: str | None = None) -> None:
+        self.inspect_messages(payload.get("messages", []), client=client)
 
-    def inspect_messages(self, messages: list[dict[str, Any]]) -> None:
+    def inspect_messages(
+        self, messages: list[dict[str, Any]], client: str | None = None
+    ) -> None:
         if self._config.mode == "off":
             return
         findings = self._scan(messages)
@@ -77,7 +79,12 @@ class InjectionInspector:
         self._publish(
             Event(
                 "attack_detected",
-                {"kind": "prompt_injection", "rule": rule, "severity": severity},
+                {
+                    "kind": "prompt_injection",
+                    "rule": rule,
+                    "severity": severity,
+                    "client": client,
+                },
             )
         )
         if (

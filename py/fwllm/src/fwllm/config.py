@@ -67,6 +67,58 @@ class EgressConfig(BaseModel):
         return self
 
 
+class Threshold(BaseModel):
+    gt: float | None = None
+    gte: float | None = None
+    lt: float | None = None
+    lte: float | None = None
+
+    def matches(self, value: float) -> bool:
+        if self.gt is not None and not value > self.gt:
+            return False
+        if self.gte is not None and not value >= self.gte:
+            return False
+        if self.lt is not None and not value < self.lt:
+            return False
+        if self.lte is not None and not value <= self.lte:
+            return False
+        return True
+
+
+class RuleCondition(BaseModel):
+    provider: str | None = None
+    provider_tokens_today: Threshold | None = None
+
+
+class RuleAction(BaseModel):
+    next_in_chain: bool = False
+    switch_to: str | None = None
+
+
+class RoutingRule(BaseModel):
+    name: str
+    when: RuleCondition
+    action: RuleAction
+
+
+class AttackFailoverConfig(BaseModel):
+    enabled: bool = False
+    count: int = 3
+    window_seconds: int = 300
+    min_severity: Literal["low", "medium", "high", "critical"] = "high"
+    switch_to: str | None = None
+    block_source: bool = True
+    block_ttl_seconds: int = 600
+    cooldown_seconds: int = 300
+
+
+class RoutingConfig(BaseModel):
+    default_chain: list[str] = Field(default_factory=list)
+    model_mapping: dict[str, dict[str, str]] = Field(default_factory=dict)
+    rules: list[RoutingRule] = Field(default_factory=list)
+    attack_failover: AttackFailoverConfig = Field(default_factory=AttackFailoverConfig)
+
+
 class Config(BaseModel):
     server: ServerConfig = Field(default_factory=ServerConfig)
     redis_url: str = "redis://localhost:6379/0"
@@ -76,6 +128,7 @@ class Config(BaseModel):
     quotas: Quotas = Field(default_factory=Quotas)
     inspectors: InspectorsConfig = Field(default_factory=InspectorsConfig)
     egress: EgressConfig = Field(default_factory=EgressConfig)
+    routing: RoutingConfig = Field(default_factory=RoutingConfig)
 
     model_config = {"frozen": True}
 

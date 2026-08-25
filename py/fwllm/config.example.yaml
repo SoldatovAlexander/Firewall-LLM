@@ -1,0 +1,64 @@
+# Example fwllm gateway configuration.
+# Secrets come from environment variables (api_key_env / client tokens via clients map).
+
+server:
+  host: 0.0.0.0
+  port: 8080
+  request_timeout_seconds: 120
+
+redis_url: redis://localhost:6379/0
+
+providers:
+  openrouter:
+    type: openrouter
+    base_url: https://openrouter.ai/api/v1
+    api_key_env: OPENROUTER_API_KEY
+    models:
+      - "meta-llama/llama-3.3-70b-instruct:free"
+  local-ollama:
+    type: ollama
+    base_url: http://localhost:11434/v1
+
+clients:
+  # token -> label; store real tokens outside VCS
+  "fwllm-client-secret-key": "alice"
+
+quotas:
+  client_tokens_per_day: 200000
+  client_requests_per_day: 1000
+
+routing:
+  default_chain: [openrouter, local-ollama]
+  model_mapping:
+    gpt-4o:
+      openrouter: "meta-llama/llama-3.3-70b-instruct:free"
+      local-ollama: "llama3.3:70b"
+  rules:
+    - name: token-budget-switch
+      when:
+        provider: openrouter
+        provider_tokens_today: { gt: 5000000 }
+      action:
+        next_in_chain: true
+  attack_failover:
+    enabled: true
+    count: 5
+    window_seconds: 300
+    min_severity: high
+    switch_to: local-ollama
+    block_source: true
+    block_ttl_seconds: 600
+    cooldown_seconds: 300
+
+inspectors:
+  dlp:
+    mode: mask            # block | mask | log | off
+    restore_policy: mask  # restore | mask
+    profile: ru_152
+  injection:
+    mode: block           # block | log | off
+    block_severity_gte: high
+
+egress:
+  mode: direct            # direct | single_proxy
+  # proxy_url: http://proxy.corp:3128   # required when mode=single_proxy

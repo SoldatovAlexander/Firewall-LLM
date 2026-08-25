@@ -28,7 +28,9 @@ class DLPInspector:
         self._config = config
         self._publish = publish or (lambda event: None)
 
-    def process_request(self, payload: dict[str, Any]) -> DLPState:
+    def process_request(
+        self, payload: dict[str, Any], client: str | None = None
+    ) -> DLPState:
         state = DLPState()
         if self._config.mode == "off":
             return state
@@ -55,7 +57,10 @@ class DLPInspector:
                 message["content"] = clean
         if total_redacted:
             self._publish(
-                Event("dlp_redacted", {"total": total_redacted, "mode": "mask"})
+                Event(
+                    "dlp_redacted",
+                    {"total": total_redacted, "mode": "mask", "client": client},
+                )
             )
         return state
 

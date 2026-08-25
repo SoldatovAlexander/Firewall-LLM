@@ -51,10 +51,23 @@ class InspectorChain:
             publish=publish,
         )
 
-    def process_request(self, payload: dict[str, Any]) -> InspectionContext:
+    def set_publish(self, publish: Callable[[Event], None] | None) -> None:
+        """Re-wire event publishing (used by gateway to feed the policy engine)."""
+        self._publish = publish
+        for inspector in self._inspectors:
+            set_pub = getattr(inspector, "_publish", None)
+            if set_pub is not None:
+                inspector._publish = publish  # noqa: SLF001
+
+    def process_request(
+        self, payload: dict[str, Any], client: str | None = None
+    ) -> InspectionContext:
         parts: list[Any] = []
         for inspector in self._inspectors:
-            parts.append(inspector.process_request(payload))
+            try:
+                parts.append(inspector.process_request(payload, client=client))
+            except TypeError:
+                parts.append(inspector.process_request(payload))
         return InspectionContext(parts=parts)
 
     def process_response(self, result: Any, ctx: InspectionContext) -> Any:

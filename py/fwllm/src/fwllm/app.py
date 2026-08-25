@@ -27,6 +27,7 @@ from fwllm.inspectors.chain import InspectorChain
 from fwllm.metering import Metering, QuotaExceeded
 from fwllm.observability.metrics import observe_request
 from fwllm.providers.base import BlockedError, Provider, ProviderError
+from fwllm.router.policy import PolicyEngine
 
 T = TypeVar("T")
 
@@ -70,14 +71,6 @@ class ChatCompletionRequest(BaseModel):
         return payload
 
 
-def _resolve_provider(config: Config, providers: dict[str, Provider]) -> Provider:
-    """Phase 1: single-provider selection. Replaced by router in phase 7."""
-    if not providers:
-        raise RuntimeError("no providers configured")
-    first = next(iter(providers))
-    return providers[first]
-
-
 async def _require_client(request: Request) -> str:
     clients: dict[str, str] = request.app.state.clients
     auth = request.headers.get("Authorization", "")
@@ -96,6 +89,7 @@ def create_app(
     providers: dict[str, Provider] | None = None,
     metering: Metering | None = None,
     inspectors: InspectorChain | None = None,
+    router: PolicyEngine | None = None,
 ) -> FastAPI:
     app = FastAPI(title="Firewall LLM", version="0.1.0")
     app.state.config = config
@@ -105,7 +99,6 @@ def create_app(
 
         providers = build_providers(config)
     app.state.providers = providers
-    provider = _resolve_provider(config, providers)
     if metering is None:
         import redis.asyncio as aioredis
 
@@ -116,7 +109,18 @@ def create_app(
     app.state.metering = metering
     if inspectors is None:
         inspectors = InspectorChain.from_config(config.inspectors)
-    app.state.inspectors = inspectors
+
+    if router is None:
+        routing = config.routing
+        if not routing.default_chain and providers:
+            routing = routing.model_copy(
+                update={"default_chain": list(providers.keys())}
+            )
+        PolicyEngine.validate_routing(routing, list(providers.keys()))
+        router = PolicyEngine(routing)
+    app.state.router = router
+    metering.subscribe(router.on_event)
+    inspectors.set_publish(router.on_event)
 
     async def validation_handler(_request: Request, exc: RequestValidationError) -> Any:
         return await validation_error_handler(_request, exc)
@@ -140,7 +144,7 @@ def create_app(
         client_id: Annotated[str, Depends(_require_client)],
     ) -> Any:
         payload = body.to_payload()
-        provider_name = next(iter(app.state.providers), "unknown")
+        provider_name = "unrouted"
         started = time.monotonic()
 
         def _metrics(code: str, prompt: int = 0, completion: int = 0) -> None:
@@ -154,9 +158,19 @@ def create_app(
                 completion=completion,
             )
 
+        try:
+            provider_name, concrete_model = router.resolve(body.model, client_id)
+        except BlockedError as exc:
+            _metrics("blocked")
+            raise blocked_error(str(exc), reason=exc.reason) from exc
+        payload["model"] = concrete_model
+        provider = app.state.providers.get(provider_name)
+        if provider is None:
+            raise upstream_error(f"routed provider '{provider_name}' not configured")
+
         if not body.stream:
             try:
-                ctx = inspectors.process_request(payload)
+                ctx = inspectors.process_request(payload, client=client_id)
             except BlockedError as exc:
                 _metrics("blocked")
                 raise blocked_error(str(exc), reason=exc.reason) from exc
@@ -174,6 +188,8 @@ def create_app(
                 _metrics("upstream_error")
                 raise upstream_error(str(exc)) from exc
             result = inspectors.process_response(result, ctx)
+            if concrete_model != body.model:
+                result["routed_from"] = body.model
             usage = result.get("usage") or {}
             prompt_tokens = int(usage.get("prompt_tokens", 0))
             completion_tokens = int(usage.get("completion_tokens", 0))
