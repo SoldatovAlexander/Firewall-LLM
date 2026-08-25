@@ -35,3 +35,6 @@ deploy/data/
 
 # Office temp files
 ~$*
+
+# runtime artifacts
+*.db

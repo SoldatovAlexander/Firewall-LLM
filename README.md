@@ -127,7 +127,10 @@ mypy src                           # type check
 | M1 | Proxy to free models (gateway + adapters) | done |
 | M2 | Token metering + Grafana dashboard | done |
 | M3 | Security: DLP/injection + egress control | done |
-| M4 | Auto provider switching + audit log — MVP complete | planned |
+| M4 | Auto provider switching + audit log — MVP complete | done |
+
+Live-verified: token-budget rule switches requests from primary to secondary
+provider mid-flight; attack bursts block the source and fail the chain over.
 
 ## License
 
