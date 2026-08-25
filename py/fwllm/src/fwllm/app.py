@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncIterator
-from typing import Annotated, Any
+import logging
+from collections.abc import AsyncIterator, Awaitable
+from typing import Annotated, Any, TypeVar
 
 from fastapi import Depends, FastAPI, Request
 from fastapi.exceptions import RequestValidationError
@@ -17,10 +18,27 @@ from fwllm.errors import (
     ApiError,
     auth_error,
     blocked_error,
+    rate_limit_error,
     upstream_error,
     validation_error_handler,
 )
+from fwllm.metering import Metering, QuotaExceeded
 from fwllm.providers.base import BlockedError, Provider, ProviderError
+
+T = TypeVar("T")
+
+logger = logging.getLogger(__name__)
+
+
+async def _metering_safe(op: Awaitable[T]) -> T | None:
+    """Metering backend outages must never break traffic (fail-open MVP policy)."""
+    try:
+        return await op
+    except QuotaExceeded:
+        raise
+    except Exception:  # noqa: BLE001
+        logger.warning("metering backend unavailable, skipping accounting")
+        return None
 
 
 class ChatMessage(BaseModel):
@@ -67,12 +85,13 @@ async def _require_client(request: Request) -> str:
         raise auth_error("invalid API key", code="invalid_api_key")
     if not clients:
         raise auth_error("no clients configured", code="invalid_api_key")
-    return token
+    return clients.get(token, token)
 
 
 def create_app(
     config: Config,
     providers: dict[str, Provider] | None = None,
+    metering: Metering | None = None,
 ) -> FastAPI:
     app = FastAPI(title="Firewall LLM", version="0.1.0")
     app.state.config = config
@@ -83,6 +102,14 @@ def create_app(
         providers = build_providers(config)
     app.state.providers = providers
     provider = _resolve_provider(config, providers)
+    if metering is None:
+        import redis.asyncio as aioredis
+
+        metering = Metering(
+            aioredis.from_url(config.redis_url, decode_responses=True),
+            quotas=config.quotas.model_dump(exclude_none=True),
+        )
+    app.state.metering = metering
 
     async def validation_handler(_request: Request, exc: RequestValidationError) -> Any:
         return await validation_error_handler(_request, exc)
@@ -108,11 +135,27 @@ def create_app(
         payload = body.to_payload()
         if not body.stream:
             try:
-                return await provider.chat(payload)
+                await _metering_safe(metering.check_client(client_id))
+            except QuotaExceeded as exc:
+                raise rate_limit_error(str(exc)) from exc
+            try:
+                result = await provider.chat(payload)
             except BlockedError as exc:
                 raise blocked_error(str(exc), reason=exc.reason) from exc
             except ProviderError as exc:
                 raise upstream_error(str(exc)) from exc
+            usage = result.get("usage") or {}
+            provider_name = next(iter(app.state.providers), "unknown")
+            await _metering_safe(
+                metering.record(
+                    client=client_id,
+                    provider=provider_name,
+                    model=body.model,
+                    prompt=int(usage.get("prompt_tokens", 0)),
+                    completion=int(usage.get("completion_tokens", 0)),
+                )
+            )
+            return result
 
         async def sse() -> AsyncIterator[str]:
             try:

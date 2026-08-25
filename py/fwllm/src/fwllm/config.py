@@ -31,12 +31,19 @@ class ProviderConfig(BaseModel):
     models: list[str] = Field(default_factory=list)
 
 
+class Quotas(BaseModel):
+    client_tokens_per_day: int | None = None
+    client_requests_per_day: int | None = None
+    provider_tokens_per_day: int | None = None
+
+
 class Config(BaseModel):
     server: ServerConfig = Field(default_factory=ServerConfig)
     redis_url: str = "redis://localhost:6379/0"
     providers: dict[str, ProviderConfig]
     # client API token -> label
     clients: dict[str, str] = Field(default_factory=dict)
+    quotas: Quotas = Field(default_factory=Quotas)
 
     model_config = {"frozen": True}
 
