@@ -1,4 +1,17 @@
 services:
+  gateway:
+    build: ./gateway
+    container_name: fwllm-gateway
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    env_file: .env
+    environment:
+      FWLLM_CONFIG: /etc/fwllm/fwllm.yaml
+    volumes:
+      - ./fwllm.yaml:/etc/fwllm/fwllm.yaml:ro
+      - ./data:/data
+
   prometheus:
     image: prom/prometheus:v2.53.0
     container_name: fwllm-prometheus

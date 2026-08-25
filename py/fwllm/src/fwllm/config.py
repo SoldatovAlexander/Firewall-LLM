@@ -173,6 +173,17 @@ def load_config(path: Path | str) -> Config:
     if env_redis:
         raw["redis_url"] = env_redis
 
+    env_clients = os.environ.get("FWLLM_CLIENT_TOKENS")
+    if env_clients:
+        clients: dict[str, str] = {}
+        for pair in env_clients.split(","):
+            pair = pair.strip()
+            if not pair:
+                continue
+            token, _, label = pair.partition(":")
+            clients[token] = label or token
+        raw["clients"] = clients
+
     try:
         cfg = Config.model_validate(raw)
     except ValidationError as exc:

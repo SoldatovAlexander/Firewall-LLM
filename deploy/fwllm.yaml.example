@@ -1,0 +1,40 @@
+# Gateway configuration mounted into the container (see README deployment).
+# Secrets come from .env via api_key_env / FWLLM_CLIENT_TOKENS.
+
+server:
+  host: 0.0.0.0
+  port: 8080
+
+redis_url: redis://localhost:6379/0
+
+providers:
+  openrouter:
+    type: openrouter
+    base_url: https://openrouter.ai/api/v1
+    api_key_env: OPENROUTER_API_KEY
+
+routing:
+  default_chain: [openrouter]
+  attack_failover:
+    enabled: true
+    count: 5
+    window_seconds: 300
+    min_severity: high
+    block_source: true
+
+inspectors:
+  dlp:
+    mode: mask
+    restore_policy: mask
+    profile: ru_152
+  injection:
+    mode: block
+    block_severity_gte: high
+
+egress:
+  mode: direct
+  # proxy_url: http://proxy.corp:3128   # required for single_proxy mode
+
+audit:
+  enabled: true
+  db_path: /data/audit.db

@@ -102,6 +102,29 @@ curl http://127.0.0.1:8080/v1/chat/completions \
 The logical model (`gpt-4o`) is mapped to a concrete provider model via the policy's
 `model_mapping`; the router picks the active provider from the chain.
 
+## Deployment (on-prem)
+
+Full stack: gateway + Prometheus + Grafana.
+
+```bash
+cd deploy
+cp fwllm.yaml.example fwllm.yaml      # edit providers/quotas/policies
+cp .env.example .env                  # provider keys, client tokens, Grafana password
+docker compose up -d --build
+```
+
+- Gateway: `http://<host>:8080` (`/healthz`, `/v1/chat/completions`, `/metrics`, `/admin/audit`)
+- Import the dashboard: `python -m fwllm.observability.grafana_import --url http://<host>:3000 --basic admin:<password> --file grafana/dashboards/fwllm-overview.json`
+
+Load test:
+
+```bash
+python scripts/loadtest.py --url http://<host>:8080/v1/chat/completions --key <client-key> --rps 50 --duration 20
+```
+
+Note: cloud LLM providers may block datacenter IPs ("Access denied by security
+policy") - use `egress.mode: single_proxy` with an allowed egress proxy.
+
 ## Tests
 
 TDD project: tests are written first for every module.
