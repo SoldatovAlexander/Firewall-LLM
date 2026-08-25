@@ -1,5 +1,6 @@
 //! fwllm-gateway: production Rust gateway (axum).
 
+pub mod audit;
 pub mod error;
 pub mod metering;
 pub mod metrics;
@@ -38,12 +39,43 @@ pub fn build_app_with_metering(
     providers: Option<Arc<providers::ProviderRegistry>>,
     metering: Option<metering::Metering>,
 ) -> Router {
-    let state = AppState::new_with_metering(config, providers, metering);
+    let audit = match audit::AuditLog::open(&config.audit) {
+        Ok(log) => Some(Arc::new(log)),
+        Err(e) => {
+            tracing::warn!("audit disabled: {e}");
+            None
+        }
+    };
+    let state = AppState::build(config, providers, metering, audit);
     Router::new()
         .route("/healthz", get(healthz))
         .route("/v1/chat/completions", post(chat_completions))
+        .route("/admin/audit", get(admin_audit))
         .route("/metrics", get(metrics_handler))
         .with_state(state)
+}
+
+async fn admin_audit(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    if let Err(err) = require_client(&state, &headers).await {
+        return err.into_response();
+    }
+    let Some(audit) = &state.audit else {
+        return (StatusCode::OK, Json(json!({"total": 0, "records": []}))).into_response();
+    };
+    let records = audit.search(
+        params.get("client").map(String::as_str),
+        params.get("code").map(String::as_str),
+        params
+            .get("limit")
+            .and_then(|l| l.parse().ok())
+            .unwrap_or(100),
+    );
+    let total = records.len();
+    (StatusCode::OK, Json(json!({"total": total, "records": records}))).into_response()
 }
 
 async fn metrics_handler() -> String {
@@ -259,6 +291,7 @@ async fn chat_completions(
         "stream": false,
     });
 
+    let payload_json = serde_json::to_string(&payload).unwrap_or_default();
     let result = provider.chat(payload.take()).await;
     let duration = started.elapsed().as_secs_f64();
 
@@ -288,10 +321,26 @@ async fn chat_completions(
                     done as i64,
                 );
             }
+            if let Some(audit) = &state.audit {
+                let response_text = completion["choices"][0]["message"]["content"]
+                    .as_str()
+                    .unwrap_or("")
+                    .to_string();
+                audit.write(
+                    &client_id, &provider_name, &body.model, "ok",
+                    prompt as i64, done as i64, &payload_json, &response_text,
+                );
+            }
             (StatusCode::OK, Json(completion)).into_response()
         }
         Err(err) => {
             metrics::observe_request(&client_id, &provider_name, &body.model, "upstream_error", duration, 0, 0);
+            if let Some(audit) = &state.audit {
+                audit.write(
+                    &client_id, &provider_name, &body.model, "upstream_error",
+                    0, 0, &payload_json, &err.to_string(),
+                );
+            }
             let message = match &err {
                 providers::ProviderError::Http { status, body } => {
                     format!("provider returned {status}: {body}")

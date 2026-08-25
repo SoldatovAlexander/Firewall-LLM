@@ -13,17 +13,27 @@ pub struct AppState {
     pub router: tokio::sync::Mutex<crate::router::PolicyEngine>,
     /// None when redis is unreachable at startup (fail-open accounting).
     pub metering: Option<crate::metering::Metering>,
+    pub audit: Option<Arc<crate::audit::AuditLog>>,
 }
 
 impl AppState {
     pub fn new(config: Config, providers: Option<Arc<ProviderRegistry>>) -> Arc<Self> {
-        Self::new_with_metering(config, providers, None)
+        Self::build(config, providers, None, None)
     }
 
     pub fn new_with_metering(
         config: Config,
         providers: Option<Arc<ProviderRegistry>>,
         metering_override: Option<crate::metering::Metering>,
+    ) -> Arc<Self> {
+        Self::build(config, providers, metering_override, None)
+    }
+
+    pub fn build(
+        config: Config,
+        providers: Option<Arc<ProviderRegistry>>,
+        metering_override: Option<crate::metering::Metering>,
+        audit: Option<Arc<crate::audit::AuditLog>>,
     ) -> Arc<Self> {
         let registry = providers.unwrap_or_else(|| {
             let mut map = ProviderRegistry::new();
@@ -60,16 +70,17 @@ impl AppState {
         if routing.default_chain.is_empty() {
             routing.default_chain = config.providers.keys().cloned().collect();
         }
-        if let Err(msg) =
-            crate::router::PolicyEngine::validate_routing(&routing, &config.providers.keys().cloned().collect::<Vec<_>>())
-        {
+        if let Err(msg) = crate::router::PolicyEngine::validate_routing(
+            &routing,
+            &config.providers.keys().cloned().collect::<Vec<_>>(),
+        ) {
             panic!("{msg}");
         }
 
         let metering = metering_override.or_else(|| {
-            crate::metering::RedisStore::new(&config.redis_url)
-                .ok()
-                .map(|store| crate::metering::Metering::new(Box::new(store), &config.quotas))
+            crate::metering::RedisStore::new(&config.redis_url).ok().map(|store| {
+                crate::metering::Metering::new(Box::new(store), &config.quotas)
+            })
         });
 
         Arc::new(Self {
@@ -78,6 +89,7 @@ impl AppState {
             providers: registry,
             router: tokio::sync::Mutex::new(crate::router::PolicyEngine::new(routing)),
             metering,
+            audit,
         })
     }
 }
