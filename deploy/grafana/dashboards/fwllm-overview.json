@@ -1,0 +1,107 @@
+{
+  "uid": "fwllm-overview",
+  "title": "Firewall LLM - Overview",
+  "tags": ["fwllm"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": { "from": "now-6h", "to": "now" },
+  "templating": {
+    "list": [
+      {
+        "name": "provider",
+        "label": "Provider",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "fwllm-prometheus" },
+        "query": "label_values(fw_requests_total, provider)",
+        "includeAll": true,
+        "multi": true,
+        "current": { "text": "All", "value": "$__all" }
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Request rate by provider",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "fwllm-prometheus" },
+      "targets": [
+        {
+          "expr": "sum(rate(fw_requests_total[5m])) by (provider)",
+          "legendFormat": "{{provider}}"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Tokens per minute (prompt vs completion)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "fwllm-prometheus" },
+      "targets": [
+        {
+          "expr": "sum(rate(fw_tokens_total{direction=\"prompt\"}[5m])) * 60",
+          "legendFormat": "prompt"
+        },
+        {
+          "expr": "sum(rate(fw_tokens_total{direction=\"completion\"}[5m])) * 60",
+          "legendFormat": "completion"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Upstream latency p95",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "fwllm-prometheus" },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(fw_request_duration_seconds_bucket[5m])) by (le, provider))",
+          "legendFormat": "{{provider}}"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Requests by outcome code",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "fwllm-prometheus" },
+      "targets": [
+        {
+          "expr": "sum(rate(fw_requests_total[5m])) by (code)",
+          "legendFormat": "{{code}}"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Total tokens today",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "fwllm-prometheus" },
+      "targets": [
+        {
+          "expr": "sum(increase(fw_tokens_total[24h]))"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "Error rate (non-ok codes)",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "fwllm-prometheus" },
+      "targets": [
+        {
+          "expr": "sum(rate(fw_requests_total{code!=\"ok\"}[5m])) / clamp_min(sum(rate(fw_requests_total[5m])), 0.001)"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "percentunit" }, "overrides": [] }
+    }
+  ]
+}

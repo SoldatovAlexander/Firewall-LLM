@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from collections.abc import AsyncIterator, Awaitable
 from typing import Annotated, Any, TypeVar
 
@@ -23,6 +24,7 @@ from fwllm.errors import (
     validation_error_handler,
 )
 from fwllm.metering import Metering, QuotaExceeded
+from fwllm.observability.metrics import observe_request
 from fwllm.providers.base import BlockedError, Provider, ProviderError
 
 T = TypeVar("T")
@@ -133,42 +135,66 @@ def create_app(
         client_id: Annotated[str, Depends(_require_client)],
     ) -> Any:
         payload = body.to_payload()
+        provider_name = next(iter(app.state.providers), "unknown")
+        started = time.monotonic()
+
+        def _metrics(code: str, prompt: int = 0, completion: int = 0) -> None:
+            observe_request(
+                client=client_id,
+                provider=provider_name,
+                model=body.model,
+                code=code,
+                duration=time.monotonic() - started,
+                prompt=prompt,
+                completion=completion,
+            )
+
         if not body.stream:
             try:
                 await _metering_safe(metering.check_client(client_id))
             except QuotaExceeded as exc:
+                _metrics("rate_limited")
                 raise rate_limit_error(str(exc)) from exc
             try:
                 result = await provider.chat(payload)
             except BlockedError as exc:
+                _metrics("blocked")
                 raise blocked_error(str(exc), reason=exc.reason) from exc
             except ProviderError as exc:
+                _metrics("upstream_error")
                 raise upstream_error(str(exc)) from exc
             usage = result.get("usage") or {}
-            provider_name = next(iter(app.state.providers), "unknown")
+            prompt_tokens = int(usage.get("prompt_tokens", 0))
+            completion_tokens = int(usage.get("completion_tokens", 0))
             await _metering_safe(
                 metering.record(
                     client=client_id,
                     provider=provider_name,
                     model=body.model,
-                    prompt=int(usage.get("prompt_tokens", 0)),
-                    completion=int(usage.get("completion_tokens", 0)),
+                    prompt=prompt_tokens,
+                    completion=completion_tokens,
                 )
             )
+            _metrics("ok", prompt=prompt_tokens, completion=completion_tokens)
             return result
 
         async def sse() -> AsyncIterator[str]:
+            code = "ok"
             try:
                 async for chunk in provider.chat_stream(payload):
                     yield f"data: {json.dumps(chunk, separators=(',', ':'))}\n\n"
             except BlockedError as exc:
+                code = "blocked"
                 err = blocked_error(str(exc), reason=exc.reason)
                 yield f"data: {json.dumps(err.as_dict(), separators=(',', ':'))}\n\n"
                 return
             except ProviderError as exc:
+                code = "upstream_error"
                 err = upstream_error(str(exc))
                 yield f"data: {json.dumps(err.as_dict(), separators=(',', ':'))}\n\n"
                 return
+            finally:
+                _metrics(code)
             yield "data: [DONE]\n\n"
 
         return StreamingResponse(sse(), media_type="text/event-stream")
