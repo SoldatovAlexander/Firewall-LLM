@@ -23,6 +23,7 @@ from fwllm.errors import (
     upstream_error,
     validation_error_handler,
 )
+from fwllm.inspectors.chain import InspectorChain
 from fwllm.metering import Metering, QuotaExceeded
 from fwllm.observability.metrics import observe_request
 from fwllm.providers.base import BlockedError, Provider, ProviderError
@@ -94,6 +95,7 @@ def create_app(
     config: Config,
     providers: dict[str, Provider] | None = None,
     metering: Metering | None = None,
+    inspectors: InspectorChain | None = None,
 ) -> FastAPI:
     app = FastAPI(title="Firewall LLM", version="0.1.0")
     app.state.config = config
@@ -112,6 +114,9 @@ def create_app(
             quotas=config.quotas.model_dump(exclude_none=True),
         )
     app.state.metering = metering
+    if inspectors is None:
+        inspectors = InspectorChain.from_config(config.inspectors)
+    app.state.inspectors = inspectors
 
     async def validation_handler(_request: Request, exc: RequestValidationError) -> Any:
         return await validation_error_handler(_request, exc)
@@ -151,6 +156,11 @@ def create_app(
 
         if not body.stream:
             try:
+                ctx = inspectors.process_request(payload)
+            except BlockedError as exc:
+                _metrics("blocked")
+                raise blocked_error(str(exc), reason=exc.reason) from exc
+            try:
                 await _metering_safe(metering.check_client(client_id))
             except QuotaExceeded as exc:
                 _metrics("rate_limited")
@@ -163,6 +173,7 @@ def create_app(
             except ProviderError as exc:
                 _metrics("upstream_error")
                 raise upstream_error(str(exc)) from exc
+            result = inspectors.process_response(result, ctx)
             usage = result.get("usage") or {}
             prompt_tokens = int(usage.get("prompt_tokens", 0))
             completion_tokens = int(usage.get("completion_tokens", 0))

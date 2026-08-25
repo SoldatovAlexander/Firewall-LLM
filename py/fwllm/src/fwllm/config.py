@@ -37,6 +37,22 @@ class Quotas(BaseModel):
     provider_tokens_per_day: int | None = None
 
 
+class DLPConfig(BaseModel):
+    mode: Literal["block", "mask", "log", "off"] = "mask"
+    restore_policy: Literal["restore", "mask"] = "mask"
+    profile: str = "ru_152"
+
+
+class InjectionConfig(BaseModel):
+    mode: Literal["block", "log", "off"] = "block"
+    block_severity_gte: Literal["low", "medium", "high", "critical"] = "high"
+
+
+class InspectorsConfig(BaseModel):
+    dlp: DLPConfig = Field(default_factory=DLPConfig)
+    injection: InjectionConfig = Field(default_factory=InjectionConfig)
+
+
 class Config(BaseModel):
     server: ServerConfig = Field(default_factory=ServerConfig)
     redis_url: str = "redis://localhost:6379/0"
@@ -44,6 +60,7 @@ class Config(BaseModel):
     # client API token -> label
     clients: dict[str, str] = Field(default_factory=dict)
     quotas: Quotas = Field(default_factory=Quotas)
+    inspectors: InspectorsConfig = Field(default_factory=InspectorsConfig)
 
     model_config = {"frozen": True}
 

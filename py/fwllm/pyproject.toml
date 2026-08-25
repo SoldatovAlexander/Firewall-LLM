@@ -16,6 +16,7 @@ dependencies = [
     "PyYAML>=6.0",
     "redis>=5.0",
     "prometheus-client>=0.20",
+    "lightanon @ git+https://github.com/SoldatovAlexander/lightanon_project.git",
 ]
 
 [project.optional-dependencies]
@@ -51,3 +52,7 @@ select = ["E", "F", "I", "UP", "B", "S"]
 [tool.mypy]
 python_version = "3.11"
 strict = true
+
+[[tool.mypy.overrides]]
+module = "lightanon.*"
+ignore_missing_imports = true
