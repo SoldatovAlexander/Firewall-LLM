@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+dist/
+build/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Environment & secrets - NEVER commit
+.env
+.env.*
+*.pem
+*.key
+secrets/
+vault.json
+
+# Configs with credentials
+config.local.yaml
+
+# IDE
+.idea/
+.vscode/
+
+# OS
+.DS_Store
+
+# Deploy runtime data
+deploy/data/
