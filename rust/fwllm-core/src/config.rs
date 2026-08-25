@@ -91,23 +91,40 @@ pub struct Threshold {
 
 impl Threshold {
     pub fn matches(&self, value: f64) -> bool {
+        // NaN-aware comparisons mirror the Python Threshold semantics
+        #[allow(clippy::neg_cmp_op_on_partial_ord)]
+        fn not_gt(a: f64, b: f64) -> bool {
+            !(a > b)
+        }
+        #[allow(clippy::neg_cmp_op_on_partial_ord)]
+        fn not_gte(a: f64, b: f64) -> bool {
+            !(a >= b)
+        }
+        #[allow(clippy::neg_cmp_op_on_partial_ord)]
+        fn not_lt(a: f64, b: f64) -> bool {
+            !(a < b)
+        }
+        #[allow(clippy::neg_cmp_op_on_partial_ord)]
+        fn not_lte(a: f64, b: f64) -> bool {
+            !(a <= b)
+        }
         if let Some(gt) = self.gt {
-            if !(value > gt) {
+            if not_gt(value, gt) {
                 return false;
             }
         }
         if let Some(gte) = self.gte {
-            if !(value >= gte) {
+            if not_gte(value, gte) {
                 return false;
             }
         }
         if let Some(lt) = self.lt {
-            if !(value < lt) {
+            if not_lt(value, lt) {
                 return false;
             }
         }
         if let Some(lte) = self.lte {
-            if !(value <= lte) {
+            if not_lte(value, lte) {
                 return false;
             }
         }

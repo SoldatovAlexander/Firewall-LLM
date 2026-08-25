@@ -1,28 +1,47 @@
-name: CI
+name: Rust CI
 
 on:
   push:
     branches: [main]
+    paths: ["rust/**"]
   pull_request:
+    paths: ["rust/**"]
 
 jobs:
-  python:
+  rust:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: py/fwllm
+        working-directory: rust
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+      - name: Lint (clippy)
+        run: cargo clippy -p fwllm-core -p fwllm-gateway --all-targets -- -D warnings
+      - name: Test
+        run: cargo test --workspace
+
+  python:
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-          cache: pip
-          cache-dependency-path: py/fwllm/pyproject.toml
       - name: Install
+        working-directory: py/fwllm
         run: pip install -e '.[dev]'
       - name: Lint (ruff)
+        working-directory: py/fwllm
         run: ruff check src tests
       - name: Type check (mypy)
+        working-directory: py/fwllm
         run: mypy src
       - name: Test
-        run: pytest tests -q --ignore-glob='*live*'
+        working-directory: py/fwllm
+        run: pytest tests -q -m "not live"

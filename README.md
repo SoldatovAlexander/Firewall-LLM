@@ -103,6 +103,22 @@ curl http://127.0.0.1:8080/v1/chat/completions \
 The logical model (`gpt-4o`) is mapped to a concrete provider model via the policy's
 `model_mapping`; the router picks the active provider from the chain.
 
+## Rust Gateway
+
+Production branch in `rust/` (axum + tokio): same unified API, same contracts,
+same metric names as the Python MVP.
+
+```bash
+cd rust
+FWLLM_CONFIG=./config.example.yaml cargo run --release -p fwllm-gateway
+```
+
+Implemented: bearer auth, non-streaming + SSE streaming completions,
+model routing (chain / model_mapping / budget rules / attack failover),
+metering quotas (Redis, fail-open), audit log (SQLite, PII redaction),
+`/admin/audit`, Prometheus metrics. Inspector chain (signatures/ML/DLP)
+remains Python-side until feature parity is reached.
+
 ## Deployment (on-prem)
 
 Full stack: gateway + Prometheus + Grafana.

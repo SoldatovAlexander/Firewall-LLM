@@ -1,6 +1,6 @@
 //! Metering unit tests (in-memory store).
 
-use fwllm_gateway::metering::{InMemoryStore, Metering, QuotaExceeded};
+use fwllm_gateway::metering::{InMemoryStore, Metering};
 use fwllm_core::config::Quotas;
 
 fn quotas(tokens: Option<i64>, requests: Option<i64>) -> Quotas {
