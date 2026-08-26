@@ -1,4 +1,4 @@
-FROM rust:1.78-bookworm AS builder
+FROM rust:bookworm AS builder
 WORKDIR /build
 COPY rust/Cargo.toml rust/Cargo.lock ./
 COPY rust/fwllm-core ./fwllm-core

@@ -7,6 +7,7 @@ use std::time::Duration;
 use std::sync::Arc;
 
 pub struct AppState {
+    pub inspectors: std::sync::Arc<crate::inspectors::chain::InspectorChain>,
     pub config: Config,
     pub clients: BTreeMap<String, String>,
     pub providers: Arc<ProviderRegistry>,
@@ -91,6 +92,8 @@ impl AppState {
             panic!("{msg}");
         }
 
+        let inspectors = std::sync::Arc::new(crate::inspectors::chain::InspectorChain::from_config(&config.inspectors));
+
         let metering = metering_override.or_else(|| {
             crate::metering::RedisStore::new(&config.redis_url).ok().map(|store| {
                 crate::metering::Metering::new(Box::new(store), &config.quotas)
@@ -98,6 +101,7 @@ impl AppState {
         });
 
         Arc::new(Self {
+            inspectors,
             clients: config.clients.clone(),
             config,
             providers: registry,

@@ -7,6 +7,7 @@ pub mod metering;
 pub mod metrics;
 pub mod providers;
 pub mod router;
+pub mod inspectors;
 pub mod state;
 
 use crate::error::ApiError;
@@ -372,6 +373,17 @@ async fn chat_completions(
         "stream": false,
     });
 
+    let chain_state = match state.inspectors.process_request(&mut payload) {
+        Ok(s) => s,
+        Err(e) => {
+            metrics::observe_request(&client_id, &provider_name, &body.model, "blocked", 0.0, 0, 0);
+            if let Some(audit) = &state.audit {
+                audit.write(&client_id, &provider_name, &body.model, "blocked", 0, 0, &serde_json::to_string(&payload).unwrap_or_default(), &e.message);
+            }
+            return e.into_response();
+        }
+    };
+
     let payload_json = serde_json::to_string(&payload).unwrap_or_default();
     let result = provider.chat(payload.take()).await;
     let duration = started.elapsed().as_secs_f64();
@@ -380,6 +392,11 @@ async fn chat_completions(
         Ok(mut completion) => {
             if concrete_model != body.model {
                 completion["routed_from"] = json!(body.model);
+            }
+            // DLP restore/mask on response
+            if let Some(content) = completion["choices"][0]["message"]["content"].as_str().map(|s| s.to_string()) {
+                let restored = state.inspectors.process_response(&content, &chain_state);
+                completion["choices"][0]["message"]["content"] = serde_json::Value::String(restored);
             }
             let usage = completion.get("usage").cloned().unwrap_or(Value::Null);
             let prompt = usage["prompt_tokens"].as_u64().unwrap_or(0);
