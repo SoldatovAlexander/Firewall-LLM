@@ -24,6 +24,9 @@ futures-util = "0.3"
 rcgen = "0.13"
 rustls = { version = "0.23", features = ["ring"] }
 anyhow = "1"
+ort = { version = "2.0.0-rc.13", features = ["download-binaries", "ndarray"] }
+tokenizers = "0.22"
+ndarray = "0.17"
 axum-server = { version = "0.7", features = ["tls-rustls"] }
 tokio-util = { version = "0.7", features = ["io"] }
 rand = "0.8"

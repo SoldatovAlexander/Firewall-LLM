@@ -2,6 +2,7 @@ use crate::error::ApiError;
 use fwllm_core::config::InspectorsConfig;
 use super::dlp::{DlpState, sanitize, deanonymize};
 use super::injection::{scan, verdict};
+use super::ml::MlInjectionInspector;
 use std::collections::HashMap;
 
 #[derive(Debug, Clone)]
@@ -11,19 +12,42 @@ pub struct ChainState {
 
 pub struct InspectorChain {
     cfg: InspectorsConfig,
+    ml: Option<MlInjectionInspector>,
 }
 
 impl InspectorChain {
     pub fn from_config(cfg: &InspectorsConfig) -> Self {
-        Self { cfg: cfg.clone() }
+        let ml = if cfg.injection.ml.enabled {
+            crate::inspectors::ml::try_load_classifier(&cfg.injection.ml.model_dir)
+                .map(|c| MlInjectionInspector::new(c, cfg.injection.ml.threshold as f32, cfg.injection.block_severity_gte.clone(), cfg.injection.mode.clone()))
+        } else { None };
+        Self { cfg: cfg.clone(), ml }
+    }
+
+    #[cfg(test)]
+    pub fn from_config_with_classifier(cfg: &InspectorsConfig, classifier: Box<dyn super::ml::TextClassifier>) -> Self {
+        let ml = if cfg.injection.ml.enabled {
+            Some(MlInjectionInspector::new(classifier, cfg.injection.ml.threshold as f32, cfg.injection.block_severity_gte.clone(), cfg.injection.mode.clone()))
+        } else { None };
+        Self { cfg: cfg.clone(), ml }
     }
 
     pub fn process_request(&self, payload: &mut serde_json::Value) -> Result<ChainState, ApiError> {
-        // 1. injection
+        // 1. injection (signatures)
+        let mut all_findings: Vec<(&'static str, &'static str)> = Vec::new();
         if self.cfg.injection.mode != "off" {
             let messages = payload.get("messages").and_then(|v| v.as_array()).cloned().unwrap_or_default();
-            let findings = scan(&messages);
-            if let Some((rule, severity)) = verdict(&findings, &self.cfg.injection.block_severity_gte) {
+            all_findings.extend(scan(&messages));
+            if let Some(ml) = &self.ml {
+                for m in &messages {
+                    if let Some(content) = m.get("content").and_then(|v| v.as_str()) {
+                        if let Some(finding) = ml.scan(content) {
+                            all_findings.push(finding);
+                        }
+                    }
+                }
+            }
+            if let Some((rule, severity)) = verdict(&all_findings, &self.cfg.injection.block_severity_gte) {
                 if self.cfg.injection.mode == "block" {
                     return Err(ApiError::blocked(format!("prompt injection detected ({rule}, severity={severity})"), "injection"));
                 }
