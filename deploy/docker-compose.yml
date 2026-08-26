@@ -43,6 +43,13 @@ services:
     volumes:
       - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
 
+  mock-llm:
+    build: ./mock-llm
+    container_name: fwllm-mock-llm
+    restart: unless-stopped
+    ports:
+      - "8001:8000"
+
   grafana:
     image: grafana/grafana:11.1.0
     container_name: fwllm-grafana

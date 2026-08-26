@@ -1,0 +1,33 @@
+replicaCount: 1
+image:
+  repository: fwllm-gateway
+  pullPolicy: IfNotPresent
+  tag: latest
+service:
+  type: ClusterIP
+  port: 8080
+  ingressPort: 8443
+config:
+  # fwllm.yaml content (see py/fwllm/config.example.yaml)
+  server:
+    host: 0.0.0.0
+    port: 8080
+  redis_url: redis://fwllm-redis:6379/0
+  ingress:
+    enabled: true
+    listen: "0.0.0.0:8443"
+secret:
+  # create via: kubectl create secret generic fwllm-secrets --from-literal=OPENROUTER_API_KEY=...
+  create: true
+  openRouterApiKey: ""
+  clientTokens: "test-client-key:alice"
+redis:
+  enabled: true
+  image: redis:7-alpine
+persistence:
+  enabled: false
+  size: 1Gi
+certs:
+  generateSelfSigned: true
+  # existingSecret: fwllm-certs
+resources: {}

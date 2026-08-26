@@ -1,0 +1,54 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "fwllm.fullname" . }}
+  labels: {{- include "fwllm.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels: {{- include "fwllm.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels: {{- include "fwllm.selectorLabels" . | nindent 8 }}
+    spec:
+      containers:
+        - name: gateway
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - containerPort: {{ .Values.service.port }}
+              name: http
+            - containerPort: {{ .Values.service.ingressPort }}
+              name: ingress
+          env:
+            - name: FWLLM_CONFIG
+              value: /etc/fwllm/fwllm.yaml
+            - name: FWLLM_CERTS_DIR
+              value: /certs
+          envFrom:
+            {{- if .Values.secret.create }}
+            - secretRef:
+                name: {{ include "fwllm.fullname" . }}-secrets
+            {{- end }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/fwllm/fwllm.yaml
+              subPath: fwllm.yaml
+            - name: certs
+              mountPath: /certs
+            - name: data
+              mountPath: /data
+          resources: {{- toYaml .Values.resources | nindent 12 }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "fwllm.fullname" . }}-config
+        - name: certs
+          emptyDir: {}
+        - name: data
+          {{- if .Values.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "fwllm.fullname" . }}-data
+          {{- else }}
+          emptyDir: {}
+          {{- end }}

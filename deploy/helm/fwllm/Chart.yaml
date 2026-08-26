@@ -1,0 +1,10 @@
+apiVersion: v2
+name: fwllm
+description: Firewall LLM — on-prem security gateway for LLM traffic
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords: [llm, gateway, security, dlp]
+home: https://github.com/SoldatovAlexander/Firewall-LLM
+sources: [https://github.com/SoldatovAlexander/Firewall-LLM]
+maintainers: [{name: Alexander Soldatov}]
