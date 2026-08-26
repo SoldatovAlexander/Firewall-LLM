@@ -19,9 +19,7 @@ services:
       - ./data:/data
 
   gateway-rust:
-    build:
-      context: ../
-      dockerfile: rust/fwllm-gateway/Dockerfile
+    build: ./gateway-rust
     container_name: fwllm-gateway-rust
     restart: unless-stopped
     ports:

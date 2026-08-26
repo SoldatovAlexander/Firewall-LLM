@@ -1,0 +1,38 @@
+[package]
+name = "fwllm-gateway"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "fwllm-gateway"
+path = "src/main.rs"
+
+[dependencies]
+fwllm-core = { path = "../fwllm-core" }
+tokio = { workspace = true }
+axum = { workspace = true, features = ["ws"] }
+tower = { workspace = true, features = ["util"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+reqwest = { workspace = true }
+prometheus = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+rand = { workspace = true }
+thiserror = { workspace = true }
+bytes = "1"
+regex = "1"
+rusqlite = { version = "0.32", features = ["bundled"] }
+redis = { version = "0.27", default-features = false, features = ["script"] }
+futures-util = { workspace = true }
+tokio-util = { workspace = true }
+axum-server = { version = "0.7", features = ["tls-rustls"] }
+anyhow = "1"
+rcgen = "0.13"
+
+[dev-dependencies]
+serde_yaml = { workspace = true }
+http-body-util = "0.1"
+tempfile = "3"
+tower = { workspace = true, features = ["util"] }
