@@ -1,8 +1,9 @@
-FROM rust:1.78-bookworm AS builder
+FROM rust:bookworm AS builder
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 COPY fwllm-core ./fwllm-core
 COPY fwllm-gateway ./fwllm-gateway
+COPY fwllm-agent ./fwllm-agent
 RUN cargo build --release -p fwllm-gateway
 
 FROM debian:bookworm-slim

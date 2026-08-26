@@ -30,6 +30,7 @@ tokio-util = { workspace = true }
 axum-server = { version = "0.7", features = ["tls-rustls"] }
 anyhow = "1"
 rcgen = "0.13"
+rustls = { version = "0.23", features = ["ring"] }
 
 [dev-dependencies]
 serde_yaml = { workspace = true }

@@ -28,6 +28,7 @@ fn ensure_self_signed_certs(dir: &Path) -> anyhow::Result<(PathBuf, PathBuf)> {
 
 #[tokio::main]
 async fn main() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
