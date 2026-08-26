@@ -50,6 +50,8 @@ impl AppState {
                             });
                             Arc::new(crate::providers::TunnelProvider::new(
                                 agent_id,
+                                pcfg.base_url.clone(),
+                                pcfg.api_key.clone(),
                                 ingress.clone(),
                             ))
                         }

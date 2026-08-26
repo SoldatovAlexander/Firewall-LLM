@@ -36,13 +36,13 @@ async fn tunnel_provider_forwards_and_returns_response() {
     let _entry = registry.issue_token(agent_id.to_string(), 1).await;
     registry.register_agent(agent_id.to_string()).await;
 
-    let provider = TunnelProvider::new(agent_id.to_string(), registry.clone());
+    let provider = TunnelProvider::new(agent_id.to_string(), "https://api.example.com/v1".to_string(), None, registry.clone());
     let payload = json!({"model":"m","messages":[{"role":"user","content":"hi"}]});
     let res = provider.chat(payload.clone()).await;
     // With agent registered, tunnel returns synthetic tunneled response
     assert!(res.is_ok());
     // Without agent, should error
     let empty_registry = shared_registry();
-    let orphan = TunnelProvider::new("ghost".to_string(), empty_registry);
+    let orphan = TunnelProvider::new("ghost".to_string(), "https://api.example.com/v1".to_string(), None, empty_registry);
     assert!(orphan.chat(payload.clone()).await.is_err());
 }

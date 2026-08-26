@@ -166,35 +166,48 @@ impl OpenAiCompatProvider {
 
 pub struct TunnelProvider {
     agent_id: String,
+    base_url: String,
+    api_key: Option<String>,
     registry: std::sync::Arc<crate::ingress::IngressRegistry>,
 }
 
 impl TunnelProvider {
-    pub fn new(agent_id: String, registry: std::sync::Arc<crate::ingress::IngressRegistry>) -> Self {
-        Self { agent_id, registry }
+    pub fn new(
+        agent_id: String,
+        base_url: String,
+        api_key: Option<String>,
+        registry: std::sync::Arc<crate::ingress::IngressRegistry>,
+    ) -> Self {
+        Self { agent_id, base_url, api_key, registry }
     }
 }
 
 impl Provider for TunnelProvider {
-    fn chat(&self, _payload: Value) -> ChatFuture {
+    fn chat(&self, payload: Value) -> ChatFuture {
         let agent_id = self.agent_id.clone();
+        let base_url = self.base_url.clone();
+        let api_key = self.api_key.clone();
         let registry = self.registry.clone();
         Box::pin(async move {
-            // Check if agent is connected
-            let agents = registry.list_agents().await;
-            let connected = agents.iter().any(|a| a.agent_id == agent_id);
-            if !connected {
-                return Err(ProviderError::Connection(format!(
-                    "no tunnel agent connected: {agent_id}"
-                )));
+            let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
+            let mut headers = std::collections::HashMap::new();
+            headers.insert("content-type".to_string(), "application/json".to_string());
+            if let Some(key) = api_key {
+                headers.insert("authorization".to_string(), format!("Bearer {key}"));
             }
-            // TODO: actual forwarding via WS channel (phase 10.5)
-            // For now return a synthetic response to prove masking path
-            Ok(serde_json::json!({
-                "id": "tunnel-1",
-                "object": "chat.completion",
-                "choices": [{"message": {"content": "tunneled"}}]
-            }))
+            let body = Some(serde_json::to_string(&payload).unwrap_or_default());
+            let resp = registry
+                .forward(&agent_id, "POST".to_string(), url, headers, body)
+                .await
+                .map_err(ProviderError::Connection)?;
+            if resp.status >= 400 {
+                return Err(ProviderError::Http {
+                    status: resp.status,
+                    body: resp.body.chars().take(200).collect(),
+                });
+            }
+            serde_json::from_str(&resp.body)
+                .map_err(|e| ProviderError::Connection(format!("non-JSON body: {e}")))
         })
     }
 }
