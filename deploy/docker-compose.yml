@@ -18,6 +18,24 @@ services:
       - ./models:/models:ro
       - ./data:/data
 
+  gateway-rust:
+    build:
+      context: ../
+      dockerfile: rust/fwllm-gateway/Dockerfile
+    container_name: fwllm-gateway-rust
+    restart: unless-stopped
+    ports:
+      - "8081:8080"
+      - "8443:8443"
+    env_file: .env
+    environment:
+      FWLLM_CONFIG: /etc/fwllm/fwllm.yaml
+      FWLLM_CERTS_DIR: /certs
+    volumes:
+      - ./fwllm.yaml:/etc/fwllm/fwllm.yaml:ro
+      - ./certs:/certs
+      - ./data-rust:/data
+
   prometheus:
     image: prom/prometheus:v2.53.0
     container_name: fwllm-prometheus
