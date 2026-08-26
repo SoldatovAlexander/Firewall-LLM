@@ -64,3 +64,32 @@ fn now_ts() -> f64 {
 pub fn shared_registry() -> Arc<IngressRegistry> {
     Arc::new(IngressRegistry::default())
 }
+
+/// Header masking for tunnel forwarding (called both on gateway and agent).
+pub fn mask_for_tunnel(
+    mut headers: std::collections::HashMap<String, String>,
+) -> std::collections::HashMap<String, String> {
+    let to_remove = [
+        "via",
+        "x-forwarded-for",
+        "x-forwarded-proto",
+        "x-forwarded-host",
+        "x-real-ip",
+        "x-forwarded-port",
+        "cf-connecting-ip",
+        "cf-ray",
+        "server",
+        "x-powered-by",
+    ];
+    for key in to_remove {
+        headers.remove(key);
+        headers.remove(&key.to_uppercase());
+        // case-insensitive removal
+        headers.retain(|k, _| k.to_ascii_lowercase() != key);
+    }
+    let has_ua = headers.keys().any(|k| k.to_ascii_lowercase() == "user-agent");
+    if !has_ua {
+        headers.insert("User-Agent".to_string(), "Firewall-LLM-Agent/0.1".to_string());
+    }
+    headers
+}

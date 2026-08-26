@@ -64,6 +64,9 @@ pub struct ProviderConfig {
     pub api_key: Option<String>,
     #[serde(default)]
     pub models: Vec<String>,
+    /// For provider_type = "tunnel": agent_id that holds the upstream
+    #[serde(default)]
+    pub agent_id: Option<String>,
 }
 
 fn default_provider_type() -> String {
