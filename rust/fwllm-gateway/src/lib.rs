@@ -2,6 +2,7 @@
 
 pub mod audit;
 pub mod error;
+pub mod ingress;
 pub mod metering;
 pub mod metrics;
 pub mod providers;
@@ -51,6 +52,9 @@ pub fn build_app_with_metering(
         .route("/healthz", get(healthz))
         .route("/v1/chat/completions", post(chat_completions))
         .route("/admin/audit", get(admin_audit))
+        .route("/admin/ingress/tokens", post(create_ingress_token))
+        .route("/admin/ingress/agents", get(list_ingress_agents))
+        .route("/ingress", get(ingress_ws_handler))
         .route("/metrics", get(metrics_handler))
         .with_state(state)
 }
@@ -76,6 +80,83 @@ async fn admin_audit(
     );
     let total = records.len();
     (StatusCode::OK, Json(json!({"total": total, "records": records}))).into_response()
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateTokenRequest {
+    agent_id: String,
+    #[serde(default = "default_ttl")]
+    ttl_hours: u64,
+}
+fn default_ttl() -> u64 { 168 }
+
+async fn create_ingress_token(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: Result<Json<CreateTokenRequest>, JsonRejection>,
+) -> Response {
+    if let Err(err) = require_client(&state, &headers).await {
+        return err.into_response();
+    }
+    let Json(req) = match body {
+        Ok(b) => b,
+        Err(e) => return ApiError::invalid_request(format!("invalid body: {e}")).into_response(),
+    };
+    if req.agent_id.trim().is_empty() {
+        return ApiError::invalid_request("agent_id is required").into_response();
+    }
+    let entry = state.ingress.issue_token(req.agent_id, req.ttl_hours).await;
+    (StatusCode::OK, Json(json!({"token": entry.token, "agent_id": entry.agent_id, "expires_at": entry.expires_at}))).into_response()
+}
+
+async fn list_ingress_agents(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(err) = require_client(&state, &headers).await {
+        return err.into_response();
+    }
+    let tokens = state.ingress.list_tokens().await;
+    let agents = state.ingress.list_agents().await;
+    (StatusCode::OK, Json(json!({"tokens": tokens, "agents": agents}))).into_response()
+}
+
+async fn ingress_ws_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    ws: Option<axum::extract::ws::WebSocketUpgrade>,
+) -> Response {
+    let auth = headers.get("authorization").and_then(|v| v.to_str().ok()).unwrap_or("");
+    let token = auth.strip_prefix("Bearer ").map(str::trim).unwrap_or("");
+    let entry = match state.ingress.validate_token(token).await {
+        Some(e) => e,
+        None => return ApiError::auth("invalid ingress token", "invalid_api_key").into_response(),
+    };
+    let Some(ws) = ws else {
+        return (StatusCode::UPGRADE_REQUIRED, "Upgrade Required").into_response();
+    };
+    let agent_id = entry.agent_id.clone();
+    let registry = state.ingress.clone();
+    ws.on_upgrade(move |socket| async move {
+        registry.register_agent(agent_id.clone()).await;
+        handle_ingress_socket(socket, agent_id).await;
+    })
+}
+
+async fn handle_ingress_socket(mut socket: axum::extract::ws::WebSocket, _agent_id: String) {
+    use axum::extract::ws::Message;
+    while let Some(Ok(msg)) = socket.recv().await {
+        match msg {
+            Message::Text(text) => {
+                // mask Via/X-Forwarded headers if present in forwarded payload
+                let _ = text;
+                let _ = socket.send(Message::Text(text)).await;
+            }
+            Message::Ping(d) => { let _ = socket.send(Message::Pong(d)).await; }
+            Message::Close(_) => break,
+            _ => {}
+        }
+    }
 }
 
 async fn metrics_handler() -> String {

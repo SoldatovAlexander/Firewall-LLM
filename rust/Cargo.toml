@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["fwllm-core", "fwllm-gateway"]
+members = ["fwllm-core", "fwllm-gateway", "fwllm-agent"]
 
 [workspace.package]
 version = "0.1.0"
