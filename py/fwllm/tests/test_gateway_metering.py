@@ -27,6 +27,12 @@ def _app(quotas: Quotas | None = None) -> tuple[TestClient, Any]:
     return TestClient(app), redis
 
 
+def _today() -> str:
+    from datetime import UTC, datetime
+
+    return datetime.now(UTC).strftime("%Y%m%d")
+
+
 async def test_usage_recorded_after_completion():
     client, redis = _app()
     with client:
@@ -35,15 +41,17 @@ async def test_usage_recorded_after_completion():
         )
         assert r.status_code == 200
     # FakeProvider usage totals 5 tokens
-    assert int(await redis.get("fwllm:c:tokens:alice:20260825") or 0) == 5
-    assert int(await redis.get("fwllm:p:tokens:mock:20260825") or 0) == 5
+    day = _today()
+    assert int(await redis.get(f"fwllm:c:tokens:alice:{day}") or 0) == 5
+    assert int(await redis.get(f"fwllm:p:tokens:mock:{day}") or 0) == 5
 
 
 async def test_quota_exceeded_returns_429_contract_error():
     quotas = Quotas(client_tokens_per_day=3)
     client, redis = _app(quotas)
+    day = _today()
     with client:
-        await redis.set("fwllm:c:tokens:alice:20260825", "10")
+        await redis.set(f"fwllm:c:tokens:alice:{day}", "10")
         r = client.post("/v1/chat/completions", json=_body(), headers=_headers())
         assert r.status_code == 429
         assert r.json()["error"]["type"] == "rate_limit_error"

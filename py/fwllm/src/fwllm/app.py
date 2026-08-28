@@ -250,19 +250,21 @@ def create_app(
                 completion_tokens=completion_tokens,
             )
 
+        # Common pre-processing for both streaming and non-streaming
+        try:
+            ctx = inspectors.process_request(payload, client=client_id)
+        except BlockedError as exc:
+            _metrics("blocked")
+            _audit_now("blocked", str(exc), messages=body.model_dump()["messages"])
+            raise blocked_error(str(exc), reason=exc.reason) from exc
+        try:
+            await _metering_safe(metering.check_client(client_id))
+        except QuotaExceeded as exc:
+            _metrics("rate_limited")
+            _audit_now("rate_limited", str(exc))
+            raise rate_limit_error(str(exc)) from exc
+
         if not body.stream:
-            try:
-                ctx = inspectors.process_request(payload, client=client_id)
-            except BlockedError as exc:
-                _metrics("blocked")
-                _audit_now("blocked", str(exc), messages=body.model_dump()["messages"])
-                raise blocked_error(str(exc), reason=exc.reason) from exc
-            try:
-                await _metering_safe(metering.check_client(client_id))
-            except QuotaExceeded as exc:
-                _metrics("rate_limited")
-                _audit_now("rate_limited", str(exc))
-                raise rate_limit_error(str(exc)) from exc
             try:
                 result = await provider.chat(payload)
             except BlockedError as exc:
@@ -299,14 +301,30 @@ def create_app(
         async def sse() -> AsyncIterator[str]:
             code = "ok"
             response_parts: list[str] = []
+            # For usage accounting in streaming, capture last chunk's usage
+            last_usage: dict[str, Any] | None = None
             try:
                 async for chunk in provider.chat_stream(payload):
+                    # Capture usage if present (OpenAI stream_options include_usage)
+                    if isinstance(chunk, dict) and chunk.get("usage"):
+                        last_usage = chunk["usage"]
                     delta = (
                         chunk.get("choices", [{}])[0].get("delta", {}).get("content")
                         if isinstance(chunk, dict)
                         else None
                     )
-                    if isinstance(delta, str):
+                    if isinstance(delta, str) and delta:
+                        # Apply streaming DLP restore if available (sliding window handled inside)
+                        try:
+                            # Find DLP inspector state for streaming
+                            for inspector, part in zip(
+                                inspectors._inspectors, ctx.parts, strict=False
+                            ):
+                                if hasattr(inspector, "restore_stream_text"):
+                                    delta = inspector.restore_stream_text(delta, part)  # type: ignore[attr-defined]
+                            chunk["choices"][0]["delta"]["content"] = delta
+                        except Exception:
+                            pass
                         response_parts.append(delta)
                     yield f"data: {json.dumps(chunk, separators=(',', ':'))}\n\n"
             except BlockedError as exc:
@@ -320,8 +338,26 @@ def create_app(
                 yield f"data: {json.dumps(err.as_dict(), separators=(',', ':'))}\n\n"
                 return
             finally:
-                _metrics(code)
-                _audit_now(code, "".join(response_parts))
+                # Record metering from usage if available, else 0 (will be corrected by tokenizer estimate in future)
+                prompt_tokens = int((last_usage or {}).get("prompt_tokens", 0))
+                completion_tokens = int((last_usage or {}).get("completion_tokens", 0))
+                if prompt_tokens or completion_tokens:
+                    try:
+                        await metering.record(
+                            client=client_id,
+                            provider=provider_name,
+                            model=body.model,
+                            prompt=prompt_tokens,
+                            completion=completion_tokens,
+                        )
+                    except Exception:
+                        pass
+                _metrics(
+                    code,
+                    prompt=prompt_tokens,
+                    completion=completion_tokens,
+                )
+                _audit_now(code, "".join(response_parts), prompt_tokens, completion_tokens)
             yield "data: [DONE]\n\n"
 
         return StreamingResponse(sse(), media_type="text/event-stream")

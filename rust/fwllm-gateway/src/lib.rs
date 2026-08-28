@@ -172,13 +172,14 @@ async fn healthz() -> Json<Value> {
 /// `data: {...}\n\n` lines terminated by `data: [DONE]`.
 #[allow(clippy::too_many_arguments)]
 async fn stream_response(
-    _state: &Arc<AppState>,
+    state: &Arc<AppState>,
     client_id: &str,
     provider_name: &str,
     model: &str,
     provider: Arc<dyn providers::Provider>,
     payload: Value,
     started: Instant,
+    chain_state: crate::inspectors::chain::ChainState,
 ) -> Response {
     let client_id = client_id.to_string();
     let provider_name = provider_name.to_string();
@@ -186,43 +187,96 @@ async fn stream_response(
     match provider.chat_stream(payload).await {
         Ok(stream) => {
             use futures_util::StreamExt;
-            let client = client_id.to_string();
-            let provider_tag = provider_name.to_string();
-            let model_tag = model.to_string();
-            let mapped = stream.map(move |item| match item {
-                Ok(chunk) => Ok::<Bytes, std::convert::Infallible>(Bytes::from(format!(
+            let client = client_id.clone();
+            let provider_tag = provider_name.clone();
+            let model_tag = model.clone();
+            let state_clone = state.clone();
+            let chain_state_clone = chain_state.clone();
+            let last_usage = std::sync::Arc::new(std::sync::Mutex::new(None::<Value>));
+            let last_usage_clone = last_usage.clone();
+            let mapped = stream.map(move |item| {
+                let mut chunk = match item {
+                    Ok(c) => c,
+                    Err(err) => {
+                        metrics::observe_request(
+                            &client,
+                            &provider_tag,
+                            &model_tag,
+                            "upstream_error",
+                            started.elapsed().as_secs_f64(),
+                            0,
+                            0,
+                        );
+                        return Ok::<Bytes, std::convert::Infallible>(Bytes::from(format!(
+                            "data: {}\n\n",
+                            json!({"error": {"message": err.to_string(), "type": "upstream_error"}})
+                        )));
+                    }
+                };
+                if chunk.get("usage").is_some() {
+                    *last_usage_clone.lock().unwrap() = chunk.get("usage").cloned();
+                }
+                if let Some(delta) = chunk
+                    .get_mut("choices")
+                    .and_then(|c| c.get_mut(0))
+                    .and_then(|c| c.get_mut("delta"))
+                    .and_then(|d| d.get_mut("content"))
+                    .and_then(|c| c.as_str())
+                    .map(|s| s.to_string())
+                {
+                    let restored = state_clone
+                        .inspectors
+                        .process_response(&delta, &chain_state_clone);
+                    if let Some(d) = chunk
+                        .get_mut("choices")
+                        .and_then(|c| c.get_mut(0))
+                        .and_then(|c| c.get_mut("delta"))
+                    {
+                        d["content"] = json!(restored);
+                    }
+                }
+                Ok::<Bytes, std::convert::Infallible>(Bytes::from(format!(
                     "data: {}\n\n",
                     chunk
-                ))),
-                Err(err) => {
-                    metrics::observe_request(
-                        &client,
-                        &provider_tag,
-                        &model_tag,
-                        "upstream_error",
-                        started.elapsed().as_secs_f64(),
-                        0,
-                        0,
-                    );
-                    Ok(Bytes::from(format!(
-                        "data: {}\n\n",
-                        json!({"error": {"message": err.to_string(), "type": "upstream_error"}})
-                    )))
-                }
+                )))
             });
-            let with_done =
+            let with_done = {
+                let last_usage = last_usage.clone();
+                let state = state.clone();
+                let client_id = client_id.clone();
+                let provider_name = provider_name.clone();
+                let model = model.clone();
+                let started = started;
                 mapped.chain(futures_util::stream::once(async move {
+                    let guard = last_usage.lock().unwrap();
+                    let prompt = guard
+                        .as_ref()
+                        .and_then(|u| u.get("prompt_tokens"))
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                    let done = guard
+                        .as_ref()
+                        .and_then(|u| u.get("completion_tokens"))
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                    drop(guard);
+                    if prompt != 0 || done != 0 {
+                        if let Some(metering) = &state.metering {
+                            metering.record(&client_id, &provider_name, &model, prompt as i64, done as i64);
+                        }
+                    }
                     metrics::observe_request(
                         &client_id,
                         &provider_name,
                         &model,
                         "ok",
                         started.elapsed().as_secs_f64(),
-                        0,
-                        0,
+                        prompt,
+                        done,
                     );
                     Ok::<Bytes, std::convert::Infallible>(Bytes::from("data: [DONE]\n\n"))
-                }));
+                }))
+            };
             Response::builder()
                 .status(StatusCode::OK)
                 .header("content-type", "text/event-stream")
@@ -353,24 +407,13 @@ async fn chat_completions(
         }
     };
 
-    if body.stream {
-        let payload = json!({
-            "model": concrete_model,
-            "messages": body.messages.iter()
-                .map(|m| json!({"role": m.role, "content": m.content}))
-                .collect::<Vec<_>>(),
-            "stream": true,
-        });
-        return stream_response(&state, &client_id, &provider_name, &body.model, provider, payload, started)
-            .await;
-    }
-
+    // Common payload construction and inspection for both streaming and non-streaming
     let mut payload = json!({
         "model": concrete_model,
         "messages": body.messages.iter()
             .map(|m| json!({"role": m.role, "content": m.content}))
             .collect::<Vec<_>>(),
-        "stream": false,
+        "stream": body.stream,
     });
 
     let chain_state = match state.inspectors.process_request(&mut payload) {
@@ -383,6 +426,11 @@ async fn chat_completions(
             return e.into_response();
         }
     };
+
+    if body.stream {
+        return stream_response(&state, &client_id, &provider_name, &body.model, provider, payload, started, chain_state)
+            .await;
+    }
 
     let payload_json = serde_json::to_string(&payload).unwrap_or_default();
     let result = provider.chat(payload.take()).await;
