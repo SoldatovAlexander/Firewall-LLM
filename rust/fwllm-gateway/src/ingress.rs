@@ -42,6 +42,13 @@ pub struct AgentConn {
     pub last_seen: f64,
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct TokenSummary {
+    pub agent_id: String,
+    pub prefix: String,
+    pub expires_at: f64,
+}
+
 impl IngressRegistry {
     pub async fn issue_token(&self, agent_id: String, ttl_hours: u64) -> TokenEntry {
         let token = generate_token();
@@ -53,6 +60,19 @@ impl IngressRegistry {
 
     pub async fn list_tokens(&self) -> Vec<TokenEntry> {
         self.tokens.read().await.values().cloned().collect()
+    }
+
+    pub async fn list_token_summaries(&self) -> Vec<TokenSummary> {
+        self.tokens
+            .read()
+            .await
+            .values()
+            .map(|e| TokenSummary {
+                agent_id: e.agent_id.clone(),
+                prefix: e.token.chars().take(6).collect(),
+                expires_at: e.expires_at,
+            })
+            .collect()
     }
 
     pub async fn validate_token(&self, token: &str) -> Option<TokenEntry> {

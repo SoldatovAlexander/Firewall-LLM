@@ -10,6 +10,7 @@ pub struct AppState {
     pub inspectors: std::sync::Arc<crate::inspectors::chain::InspectorChain>,
     pub config: Config,
     pub clients: BTreeMap<String, String>,
+    pub admin_clients: BTreeMap<String, String>,
     pub providers: Arc<ProviderRegistry>,
     pub router: tokio::sync::Mutex<crate::router::PolicyEngine>,
     /// None when redis is unreachable at startup (fail-open accounting).
@@ -103,6 +104,7 @@ impl AppState {
         Arc::new(Self {
             inspectors,
             clients: config.clients.clone(),
+            admin_clients: config.admin_clients.clone(),
             config,
             providers: registry,
             router: tokio::sync::Mutex::new(crate::router::PolicyEngine::new(routing)),

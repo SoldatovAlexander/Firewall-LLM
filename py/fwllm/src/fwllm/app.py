@@ -85,6 +85,26 @@ async def _require_client(request: Request) -> str:
     return clients.get(token, token)
 
 
+async def _require_admin(request: Request) -> str:
+    admin_clients: dict[str, str] = getattr(request.app.state, "admin_clients", {})
+    clients: dict[str, str] = request.app.state.clients
+    auth = request.headers.get("Authorization", "")
+    if not auth.startswith("Bearer "):
+        raise auth_error("missing bearer token", code="missing_api_key")
+    token = auth.removeprefix("Bearer ").strip()
+    if not token:
+        raise auth_error("invalid API key", code="invalid_api_key")
+    if admin_clients:
+        if token in admin_clients:
+            return admin_clients[token]
+        raise ApiError(status=403, type_="permission_error", message="admin privileges required", code="admin_required")
+    # Fallback: if no admin tokens configured, allow any valid client but warn (insecure)
+    if token in clients:
+        logger.warning("admin endpoint accessed with client token; configure admin_clients for proper isolation")
+        return clients[token]
+    raise auth_error("invalid API key", code="invalid_api_key")
+
+
 def _build_redis_store(url: str) -> Any:
     import redis as redis_sync
 
@@ -104,6 +124,7 @@ def create_app(
     app = FastAPI(title="Firewall LLM", version="0.1.0")
     app.state.config = config
     app.state.clients = config.clients
+    app.state.admin_clients = config.admin_clients
     if providers is None:
         from fwllm.providers.registry import build_providers
 
@@ -187,11 +208,18 @@ def create_app(
 
     @app.get("/admin/audit")
     async def admin_audit(
-        client_id: Annotated[str, Depends(_require_client)],
+        request: Request,
         code: str | None = None,
         limit: int = 100,
     ) -> Any:
-        records = audit_log.search(code=code, limit=min(limit, 1000))
+        # Admin can see all (with optional ?client= filter), non-admin only own records
+        try:
+            await _require_admin(request)
+            client_filter = request.query_params.get("client")
+        except ApiError:
+            client_id = await _require_client(request)
+            client_filter = client_id
+        records = audit_log.search(client=client_filter, code=code, limit=min(limit, 1000))
         return {"total": len(records), "records": records}
 
     @app.post("/v1/chat/completions")

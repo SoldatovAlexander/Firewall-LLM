@@ -65,14 +65,25 @@ async fn admin_audit(
     headers: HeaderMap,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Response {
-    if let Err(err) = require_client(&state, &headers).await {
-        return err.into_response();
-    }
+    // Try admin first, then fall back to client self-audit
+    let (client_id, is_admin) = match require_admin(&state, &headers).await {
+        Ok(id) => (id, true),
+        Err(_) => match require_client(&state, &headers).await {
+            Ok(id) => (id, false),
+            Err(err) => return err.into_response(),
+        },
+    };
     let Some(audit) = &state.audit else {
         return (StatusCode::OK, Json(json!({"total": 0, "records": []}))).into_response();
     };
+    // Non-admin can only see own records, ignoring ?client= param
+    let client_filter = if is_admin {
+        params.get("client").map(String::as_str)
+    } else {
+        Some(client_id.as_str())
+    };
     let records = audit.search(
-        params.get("client").map(String::as_str),
+        client_filter,
         params.get("code").map(String::as_str),
         params
             .get("limit")
@@ -96,7 +107,7 @@ async fn create_ingress_token(
     headers: HeaderMap,
     body: Result<Json<CreateTokenRequest>, JsonRejection>,
 ) -> Response {
-    if let Err(err) = require_client(&state, &headers).await {
+    if let Err(err) = require_admin(&state, &headers).await {
         return err.into_response();
     }
     let Json(req) = match body {
@@ -114,10 +125,10 @@ async fn list_ingress_agents(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> Response {
-    if let Err(err) = require_client(&state, &headers).await {
+    if let Err(err) = require_admin(&state, &headers).await {
         return err.into_response();
     }
-    let tokens = state.ingress.list_tokens().await;
+    let tokens = state.ingress.list_token_summaries().await;
     let agents = state.ingress.list_agents().await;
     (StatusCode::OK, Json(json!({"tokens": tokens, "agents": agents}))).into_response()
 }
@@ -369,6 +380,39 @@ async fn require_client(
         return Err(ApiError::auth("invalid API key", "invalid_api_key"));
     }
     Ok(state.clients.get(token).cloned().unwrap_or_default())
+}
+
+async fn require_admin(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<String, ApiError> {
+    let auth = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let token = auth.strip_prefix("Bearer ").map(str::trim).unwrap_or("");
+    if token.is_empty() {
+        return Err(ApiError::auth("missing bearer token", "missing_api_key"));
+    }
+    // Prefer dedicated admin tokens; fall back to clients only if no admin tokens configured (with warning)
+    if !state.admin_clients.is_empty() {
+        if let Some(label) = state.admin_clients.get(token) {
+            return Ok(label.clone());
+        }
+        return Err(ApiError {
+            status: axum::http::StatusCode::FORBIDDEN,
+            kind: "permission_error",
+            message: "admin privileges required".to_string(),
+            code: Some("admin_required"),
+            details: None,
+        });
+    }
+    // Fallback: if no admin tokens configured, treat any valid client as admin but log warning
+    if state.clients.contains_key(token) {
+        tracing::warn!("admin endpoint accessed with client token; configure admin_clients for proper isolation");
+        return Ok(state.clients.get(token).cloned().unwrap_or_default());
+    }
+    Err(ApiError::auth("invalid API key", "invalid_api_key"))
 }
 
 async fn chat_completions(

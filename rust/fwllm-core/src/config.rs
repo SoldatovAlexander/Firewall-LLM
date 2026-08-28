@@ -372,6 +372,8 @@ pub struct Config {
     #[serde(default)]
     pub clients: BTreeMap<String, String>,
     #[serde(default)]
+    pub admin_clients: BTreeMap<String, String>,
+    #[serde(default)]
     pub quotas: Quotas,
     #[serde(default)]
     pub routing: RoutingConfig,
@@ -440,6 +442,29 @@ pub fn load_config_from_str(raw: &str) -> Result<Config, ConfigError> {
             mm.insert(
                 serde_yaml::Value::from("clients"),
                 serde_yaml::Value::Mapping(clients),
+            );
+        }
+    }
+    if let Ok(tokens) = std::env::var("FWLLM_ADMIN_TOKENS") {
+        let mut admin_clients = serde_yaml::Mapping::new();
+        for pair in tokens.split(',') {
+            let pair = pair.trim();
+            if pair.is_empty() {
+                continue;
+            }
+            let (token, label) = match pair.split_once(':') {
+                Some((t, l)) => (t, l),
+                None => (pair, ""),
+            };
+            admin_clients.insert(
+                serde_yaml::Value::from(token),
+                serde_yaml::Value::from(if label.is_empty() { token } else { label }),
+            );
+        }
+        if let Some(mm) = value.as_mapping_mut() {
+            mm.insert(
+                serde_yaml::Value::from("admin_clients"),
+                serde_yaml::Value::Mapping(admin_clients),
             );
         }
     }

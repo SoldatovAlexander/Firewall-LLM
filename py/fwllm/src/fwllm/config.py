@@ -171,6 +171,8 @@ class Config(BaseModel):
     providers: dict[str, ProviderConfig]
     # client API token -> label
     clients: dict[str, str] = Field(default_factory=dict)
+    # admin API tokens (separate from clients) -> label, for /admin/*. If empty, fall back to clients with admin scope.
+    admin_clients: dict[str, str] = Field(default_factory=dict)
     quotas: Quotas = Field(default_factory=Quotas)
     inspectors: InspectorsConfig = Field(default_factory=InspectorsConfig)
     egress: EgressConfig = Field(default_factory=EgressConfig)
@@ -223,6 +225,17 @@ def load_config(path: Path | str) -> Config:
             token, _, label = pair.partition(":")
             clients[token] = label or token
         raw["clients"] = clients
+
+    env_admin = os.environ.get("FWLLM_ADMIN_TOKENS")
+    if env_admin:
+        admin_clients: dict[str, str] = {}
+        for pair in env_admin.split(","):
+            pair = pair.strip()
+            if not pair:
+                continue
+            token, _, label = pair.partition(":")
+            admin_clients[token] = label or token
+        raw["admin_clients"] = admin_clients
 
     try:
         cfg = Config.model_validate(raw)

@@ -15,23 +15,30 @@ fn card_re() -> &'static Regex { static C: OnceLock<Regex> = OnceLock::new(); C.
 pub fn sanitize(text: &str, vault: &mut HashMap<String, String>, scope: &mut HashMap<String, usize>) -> String {
     let mut out = text.to_string();
     for (re, typ) in [(email_re(), "EMAIL"), (phone_re(), "PHONE"), (card_re(), "CARD")] {
+        // Collect matches first to avoid borrowing issues
+        let matches: Vec<String> = re.find_iter(&out.clone()).map(|m| m.as_str().to_string()).collect();
         let mut n = out.clone();
-        for m in re.find_iter(&out.clone()) {
-            let val = m.as_str().to_string();
-            let token = format!("[{}_{:08x}]", typ, fxhash(&val));
-            vault.entry(token.clone()).or_insert(val);
+        for val in matches {
+            // Reuse existing token for same value within this request
+            let token = if let Some(existing) = vault.iter().find(|(_, v)| *v == &val).map(|(k, _)| k.clone()) {
+                existing
+            } else {
+                let mut t;
+                loop {
+                    t = format!("[{}_{:016x}{:016x}]", typ, rand::random::<u64>(), rand::random::<u64>());
+                    if !vault.contains_key(&t) {
+                        break;
+                    }
+                }
+                vault.insert(t.clone(), val.clone());
+                t
+            };
             *scope.entry(token.clone()).or_insert(0) += 1;
-            n = n.replacen(m.as_str(), &token, 1);
+            n = n.replacen(&val, &token, 1);
         }
         out = n;
     }
     out
-}
-
-fn fxhash(s: &str) -> u32 {
-    let mut h: u32 = 0;
-    for b in s.bytes() { h = h.wrapping_mul(31).wrapping_add(b as u32); }
-    h
 }
 
 pub fn deanonymize(text: &str, vault: &HashMap<String, String>, scope: &HashMap<String, usize>, policy: &str) -> String {
