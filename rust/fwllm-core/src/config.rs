@@ -196,7 +196,7 @@ fn default_cooldown() -> u64 {
     300
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct RoutingConfig {
     #[serde(rename = "default_chain", default)]
     pub default_chain: Vec<String>,
@@ -210,11 +210,23 @@ pub struct RoutingConfig {
     pub state_store: String,
 }
 
+impl Default for RoutingConfig {
+    fn default() -> Self {
+        Self {
+            default_chain: Vec::new(),
+            model_mapping: BTreeMap::new(),
+            rules: Vec::new(),
+            attack_failover: AttackFailoverConfig::default(),
+            state_store: default_state_store(),
+        }
+    }
+}
+
 fn default_state_store() -> String {
     "memory".to_string()
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct EgressConfig {
     #[serde(default = "default_egress_mode")]
     pub mode: String,
@@ -222,11 +234,20 @@ pub struct EgressConfig {
     pub proxy_url: Option<String>,
 }
 
+impl Default for EgressConfig {
+    fn default() -> Self {
+        Self {
+            mode: default_egress_mode(),
+            proxy_url: None,
+        }
+    }
+}
+
 fn default_egress_mode() -> String {
     "direct".to_string()
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct DlpConfig {
     #[serde(default = "default_dlp_mode")]
     pub mode: String,
@@ -234,6 +255,16 @@ pub struct DlpConfig {
     pub restore_policy: String,
     #[serde(default = "default_profile")]
     pub profile: String,
+}
+
+impl Default for DlpConfig {
+    fn default() -> Self {
+        Self {
+            mode: default_dlp_mode(),
+            restore_policy: default_restore_policy(),
+            profile: default_profile(),
+        }
+    }
 }
 
 fn default_dlp_mode() -> String {
@@ -266,7 +297,7 @@ impl Default for MlModelConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct InjectionConfig {
     #[serde(default = "default_injection_mode")]
     pub mode: String,
@@ -277,6 +308,16 @@ pub struct InjectionConfig {
     pub block_severity_gte: String,
     #[serde(default)]
     pub ml: MlModelConfig,
+}
+
+impl Default for InjectionConfig {
+    fn default() -> Self {
+        Self {
+            mode: default_injection_mode(),
+            block_severity_gte: default_block_severity_gte(),
+            ml: MlModelConfig::default(),
+        }
+    }
 }
 
 fn default_injection_mode() -> String {
