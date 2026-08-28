@@ -1,0 +1,33 @@
+server:
+  host: 0.0.0.0
+  port: 8080
+
+providers:
+  mock:
+    type: openai_compat
+    base_url: http://mock-llm:8000/v1
+
+clients:
+  bench-key: bench
+
+routing:
+  default_chain: [mock]
+
+inspectors:
+  dlp:
+    mode: mask
+    restore_policy: mask
+    profile: ru_152
+  injection:
+    mode: block
+    block_severity_gte: high
+    ml:
+      enabled: true
+      model_dir: /models/pi
+      threshold: 0.30
+
+egress:
+  mode: direct
+
+audit:
+  enabled: false

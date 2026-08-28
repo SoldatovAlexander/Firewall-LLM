@@ -139,23 +139,63 @@ async fn ingress_ws_handler(
     let agent_id = entry.agent_id.clone();
     let registry = state.ingress.clone();
     ws.on_upgrade(move |socket| async move {
-        registry.register_agent(agent_id.clone()).await;
-        handle_ingress_socket(socket, agent_id).await;
+        handle_ingress_socket(socket, agent_id, registry).await;
     })
 }
 
-async fn handle_ingress_socket(mut socket: axum::extract::ws::WebSocket, _agent_id: String) {
+async fn handle_ingress_socket(
+    mut socket: axum::extract::ws::WebSocket,
+    agent_id: String,
+    registry: std::sync::Arc<crate::ingress::IngressRegistry>,
+) {
     use axum::extract::ws::Message;
-    while let Some(Ok(msg)) = socket.recv().await {
-        match msg {
-            Message::Text(text) => {
-                // mask Via/X-Forwarded headers if present in forwarded payload
-                let _ = text;
-                let _ = socket.send(Message::Text(text)).await;
+    use tokio::sync::mpsc;
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    registry.register_tunnel(agent_id.clone(), tx).await;
+    let mut pending: std::collections::HashMap<String, tokio::sync::oneshot::Sender<crate::ingress::ProxyResponse>> = std::collections::HashMap::new();
+    loop {
+        tokio::select! {
+            msg = socket.recv() => {
+                match msg {
+                    Some(Ok(Message::Text(text))) => {
+                        // Agent reply: {id, status, headers, body}
+                        if let Ok(val) = serde_json::from_str::<serde_json::Value>(&text) {
+                            if let Some(id) = val.get("id").and_then(|v| v.as_str()) {
+                                if let Some(tx) = pending.remove(id) {
+                                    let resp = crate::ingress::ProxyResponse {
+                                        status: val.get("status").and_then(|v| v.as_u64()).unwrap_or(200) as u16,
+                                        headers: val.get("headers").and_then(|v| v.as_object()).map(|m| m.iter().map(|(k,v)| (k.clone(), v.as_str().unwrap_or("").to_string())).collect()).unwrap_or_default(),
+                                        body: val.get("body").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                                    };
+                                    let _ = tx.send(resp);
+                                }
+                            }
+                        }
+                    }
+                    Some(Ok(Message::Ping(d))) => { let _ = socket.send(Message::Pong(d)).await; }
+                    Some(Ok(Message::Close(_))) | None => break,
+                    _ => {}
+                }
             }
-            Message::Ping(d) => { let _ = socket.send(Message::Pong(d)).await; }
-            Message::Close(_) => break,
-            _ => {}
+            req = rx.recv() => {
+                match req {
+                    Some(proxy_req) => {
+                        let id = proxy_req.id.clone();
+                        pending.insert(id.clone(), proxy_req.responder);
+                        let frame = serde_json::json!({
+                            "id": proxy_req.id,
+                            "method": proxy_req.method,
+                            "url": proxy_req.url,
+                            "headers": proxy_req.headers,
+                            "body": proxy_req.body,
+                        });
+                        if socket.send(Message::Text(frame.to_string().into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    None => break,
+                }
+            }
         }
     }
 }

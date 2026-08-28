@@ -86,32 +86,27 @@ impl IngressRegistry {
         headers: HashMap<String, String>,
         body: Option<String>,
     ) -> Result<ProxyResponse, String> {
-        // If a real tunnel channel exists, use it
-        if let Some(sender) = self.tunnels.read().await.get(agent_id).cloned() {
-            let (tx, rx) = oneshot::channel();
-            let req = ProxyRequest {
-                id: format!("{}", rand::random::<u64>()),
-                method,
-                url,
-                headers: mask_for_tunnel(headers),
-                body,
-                responder: tx,
-            };
-            sender.send(req).map_err(|_| "agent disconnected".to_string())?;
-            return tokio::time::timeout(std::time::Duration::from_secs(30), rx)
-                .await
-                .map_err(|_| "tunnel timeout".to_string())?
-                .map_err(|_| "agent dropped".to_string());
-        }
-        // Fallback: agent registered but no tunnel channel (simple synthetic for tests)
-        if self.agents.read().await.contains_key(agent_id) {
-            return Ok(ProxyResponse {
-                status: 200,
-                headers: HashMap::new(),
-                body: r#"{"id":"tunnel-1","object":"chat.completion","choices":[{"message":{"content":"tunneled"}}]}"#.to_string(),
-            });
-        }
-        Err(format!("no tunnel for agent {agent_id}"))
+        let sender = self
+            .tunnels
+            .read()
+            .await
+            .get(agent_id)
+            .cloned()
+            .ok_or_else(|| format!("no tunnel for agent {agent_id}"))?;
+        let (tx, rx) = oneshot::channel();
+        let req = ProxyRequest {
+            id: format!("{}", rand::random::<u64>()),
+            method,
+            url,
+            headers: mask_for_tunnel(headers),
+            body,
+            responder: tx,
+        };
+        sender.send(req).map_err(|_| "agent disconnected".to_string())?;
+        tokio::time::timeout(std::time::Duration::from_secs(30), rx)
+            .await
+            .map_err(|_| "tunnel timeout".to_string())?
+            .map_err(|_| "agent dropped".to_string())
     }
 }
 

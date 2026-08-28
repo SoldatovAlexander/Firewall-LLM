@@ -25,22 +25,31 @@ fn tunnel_masks_via_and_forwarded_headers() {
 
 #[tokio::test]
 async fn tunnel_provider_forwards_and_returns_response() {
-    // This test will be Green after TunnelProvider is implemented.
-    // For now it is Red: TunnelProvider not yet exists.
+    use fwllm_gateway::ingress::{shared_registry, ProxyResponse};
     use fwllm_gateway::providers::TunnelProvider;
-    use fwllm_gateway::ingress::shared_registry;
+    use tokio::sync::mpsc;
+
     let registry = shared_registry();
-    // register a fake agent that echoes
     let agent_id = "test-agent";
-    // issue a token and register
     let _entry = registry.issue_token(agent_id.to_string(), 1).await;
-    registry.register_agent(agent_id.to_string()).await;
+    // Register a real tunnel channel with a handler that returns a proper JSON
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    registry.register_tunnel(agent_id.to_string(), tx).await;
+    tokio::spawn(async move {
+        while let Some(req) = rx.recv().await {
+            let _ = req.responder.send(ProxyResponse {
+                status: 200,
+                headers: std::collections::HashMap::new(),
+                body: r#"{"id":"tunnel-1","object":"chat.completion","choices":[{"message":{"content":"tunneled"}}]}"#.to_string(),
+            });
+        }
+    });
 
     let provider = TunnelProvider::new(agent_id.to_string(), "https://api.example.com/v1".to_string(), None, registry.clone());
     let payload = json!({"model":"m","messages":[{"role":"user","content":"hi"}]});
     let res = provider.chat(payload.clone()).await;
-    // With agent registered, tunnel returns synthetic tunneled response
     assert!(res.is_ok());
+    assert_eq!(res.unwrap()["choices"][0]["message"]["content"], "tunneled");
     // Without agent, should error
     let empty_registry = shared_registry();
     let orphan = TunnelProvider::new("ghost".to_string(), "https://api.example.com/v1".to_string(), None, empty_registry);

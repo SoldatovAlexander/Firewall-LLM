@@ -1,0 +1,7 @@
+services:
+  gateway:
+    volumes:
+      - ./fwllm-bench-ml.yaml:/etc/fwllm/fwllm.yaml:ro
+  gateway-rust:
+    volumes:
+      - ./fwllm-bench-ml.yaml:/etc/fwllm/fwllm.yaml:ro
