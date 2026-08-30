@@ -73,6 +73,7 @@ pub struct Metering {
     store: Box<dyn MeteringStore>,
     client_tokens_per_day: Option<i64>,
     client_requests_per_day: Option<i64>,
+    provider_tokens_per_day: Option<i64>,
     backend_fail_closed: bool,
 }
 
@@ -82,6 +83,7 @@ impl Metering {
             store,
             client_tokens_per_day: quotas.client_tokens_per_day,
             client_requests_per_day: quotas.client_requests_per_day,
+            provider_tokens_per_day: quotas.provider_tokens_per_day,
             backend_fail_closed: quotas.backend_fail_closed,
         }
     }
@@ -124,6 +126,28 @@ impl Metering {
             };
             if used >= limit {
                 return Err(MeteringError::QuotaExceeded { scope: "requests", limit });
+            }
+        }
+        Ok(())
+    }
+
+    pub fn check_provider(&self, provider: &str) -> Result<(), MeteringError> {
+        if let Some(limit) = self.provider_tokens_per_day {
+            let day = self.day();
+            let used = match self.store.get(&format!("fwllm:p:tokens:{provider}:{day}")) {
+                Ok(v) => v,
+                Err(e) => {
+                    if self.backend_fail_closed {
+                        return Err(MeteringError::BackendUnavailable(e));
+                    }
+                    return Ok(());
+                }
+            };
+            if used >= limit {
+                return Err(MeteringError::QuotaExceeded {
+                    scope: "provider_tokens",
+                    limit,
+                });
             }
         }
         Ok(())

@@ -316,6 +316,24 @@ def create_app(
                 message=f"metering backend unavailable: {exc}",
                 code="backend_unavailable",
             ) from exc
+        try:
+            if metering._backend_fail_closed:
+                await metering.check_provider(provider_name)
+            else:
+                await _metering_safe(metering.check_provider(provider_name))
+        except QuotaExceeded as exc:
+            _metrics("rate_limited")
+            _audit_now("rate_limited", str(exc))
+            raise rate_limit_error(str(exc)) from exc
+        except Exception as exc:
+            _metrics("backend_error")
+            _audit_now("backend_error", str(exc))
+            raise ApiError(
+                status=503,
+                type_="rate_limit_error",
+                message=f"metering backend unavailable: {exc}",
+                code="backend_unavailable",
+            ) from exc
 
         if not body.stream:
             try:

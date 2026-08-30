@@ -487,6 +487,26 @@ async fn chat_completions(
                 // fail-open: ignore backend errors
             }
         }
+        match metering.check_provider(&provider_name) {
+            Ok(()) => {}
+            Err(crate::metering::MeteringError::QuotaExceeded { scope, limit }) => {
+                metrics::observe_request(&client_id, &provider_name, &body.model, "rate_limited", 0.0, 0, 0);
+                return ApiError::rate_limited(format!("daily {scope} quota exceeded (limit={limit})"))
+                    .into_response();
+            }
+            Err(crate::metering::MeteringError::BackendUnavailable(msg)) => {
+                if metering.backend_fail_closed() {
+                    metrics::observe_request(&client_id, &provider_name, &body.model, "backend_error", 0.0, 0, 0);
+                    return ApiError {
+                        status: axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                        kind: "rate_limit_error",
+                        message: format!("metering backend unavailable: {msg}"),
+                        code: Some("backend_unavailable"),
+                        details: None,
+                    }.into_response();
+                }
+            }
+        }
     }
 
     let provider = match state.providers.get(&provider_name) {

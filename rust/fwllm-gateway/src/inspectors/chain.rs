@@ -61,7 +61,6 @@ impl InspectorChain {
                 for msg in messages {
                     if let Some(content) = msg.get("content").and_then(|v| v.as_str()).map(|s| s.to_string()) {
                         if self.cfg.dlp.mode == "block" {
-                            // check if any PII would be found
                             let mut tmp_vault = HashMap::new();
                             let mut tmp_scope = HashMap::new();
                             let sanitized = sanitize(&content, &mut tmp_vault, &mut tmp_scope);
@@ -71,6 +70,10 @@ impl InspectorChain {
                         } else if self.cfg.dlp.mode == "mask" {
                             let new_content = sanitize(&content, &mut vault, &mut scope);
                             msg["content"] = serde_json::Value::String(new_content);
+                        } else if self.cfg.dlp.mode == "log" {
+                            let mut tmp_vault = HashMap::new();
+                            let mut tmp_scope = HashMap::new();
+                            let _ = sanitize(&content, &mut tmp_vault, &mut tmp_scope);
                         }
                     }
                 }

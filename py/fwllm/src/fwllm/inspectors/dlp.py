@@ -55,11 +55,14 @@ class DLPInspector:
                 for token, count in scope.items():
                     state.scope[token] = state.scope.get(token, 0) + count
                 message["content"] = clean
+            elif self._config.mode == "log":
+                report = state.sanitizer.scan(content)
+                total_redacted += int(report["total"])
         if total_redacted:
             self._publish(
                 Event(
                     "dlp_redacted",
-                    {"total": total_redacted, "mode": "mask", "client": client},
+                    {"total": total_redacted, "mode": self._config.mode, "client": client},
                 )
             )
         return state

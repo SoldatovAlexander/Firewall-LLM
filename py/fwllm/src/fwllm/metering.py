@@ -101,6 +101,25 @@ class Metering:
                     scope="requests",
                 )
 
+    async def check_provider(self, provider: str) -> None:
+        await self._ensure_ready()
+        day = self._day()
+        provider_limit = self._quotas.get("provider_tokens_per_day")
+        if provider_limit is not None:
+            used = int(await self._redis.get(f"fwllm:p:tokens:{provider}:{day}") or 0)
+            if used >= provider_limit:
+                self._publish(
+                    Event(
+                        "quota_exceeded",
+                        {"provider": provider, "scope": "provider_tokens", "limit": provider_limit},
+                    )
+                )
+                raise QuotaExceeded(
+                    f"daily provider token quota exceeded ({used}/{provider_limit}) for {provider}",
+                    limit=provider_limit,
+                    scope="provider_tokens",
+                )
+
     async def record(
         self,
         *,
