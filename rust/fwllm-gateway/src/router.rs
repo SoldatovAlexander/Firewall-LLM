@@ -27,6 +27,18 @@ pub struct RouterBlocked {
     pub message: String,
 }
 
+#[derive(Debug)]
+pub enum RoutingError {
+    Blocked(RouterBlocked),
+    BudgetExhausted(String),
+}
+
+impl From<RouterBlocked> for RoutingError {
+    fn from(b: RouterBlocked) -> Self {
+        RoutingError::Blocked(b)
+    }
+}
+
 type Clock = fn() -> f64;
 
 fn system_clock() -> f64 {
@@ -142,7 +154,7 @@ impl PolicyEngine {
         &mut self,
         requested_model: &str,
         client_id: &str,
-    ) -> Result<(String, String), RouterBlocked> {
+    ) -> Result<(String, String), RoutingError> {
         let now = (self.clock)();
         if self
             .blocked_sources
@@ -151,9 +163,9 @@ impl PolicyEngine {
             .unwrap_or(0.0)
             > now
         {
-            return Err(RouterBlocked {
+            return Err(RoutingError::Blocked(RouterBlocked {
                 message: "request source is temporarily blocked".to_string(),
-            });
+            }));
         }
 
         let mut candidates: Vec<String> = if self.routing.default_chain.is_empty() {
@@ -175,13 +187,14 @@ impl PolicyEngine {
         let day = day_string(now);
         let mapping = self.routing.model_mapping.get(requested_model).cloned();
 
-        for candidate in &candidates {
-            let violating = self
+        for (idx, candidate) in candidates.iter().enumerate() {
+            let violating: Vec<_> = self
                 .routing
                 .rules
                 .iter()
-                .any(|rule| self.violates_rule(candidate, rule, &day));
-            if !violating {
+                .filter(|rule| self.violates_rule(candidate, rule, &day))
+                .collect();
+            if violating.is_empty() {
                 let concrete = mapping
                     .as_ref()
                     .and_then(|m| m.get(candidate))
@@ -189,14 +202,26 @@ impl PolicyEngine {
                     .unwrap_or_else(|| requested_model.to_string());
                 return Ok((candidate.clone(), concrete));
             }
+            // Handle action of first violating rule
+            let rule = violating[0];
+            if let Some(switch_to) = &rule.action.switch_to {
+                return Ok((
+                    switch_to.clone(),
+                    mapping
+                        .as_ref()
+                        .and_then(|m| m.get(switch_to))
+                        .cloned()
+                        .unwrap_or_else(|| requested_model.to_string()),
+                ));
+            }
+            if rule.action.next_in_chain {
+                continue;
+            }
         }
-        let head = candidates[0].clone();
-        let concrete = mapping
-            .as_ref()
-            .and_then(|m| m.get(&head))
-            .cloned()
-            .unwrap_or_else(|| requested_model.to_string());
-        Ok((head, concrete))
+        Err(RoutingError::BudgetExhausted(format!(
+            "all providers in chain {:?} exceeded budget/rules",
+            candidates
+        )))
     }
 }
 

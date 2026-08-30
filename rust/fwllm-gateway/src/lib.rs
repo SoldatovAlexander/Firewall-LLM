@@ -442,7 +442,7 @@ async fn chat_completions(
                 provider_name = provider;
                 concrete_model = model;
             }
-            Err(blocked) => {
+            Err(crate::router::RoutingError::Blocked(blocked)) => {
                 metrics::observe_request(
                     &client_id,
                     "unrouted",
@@ -454,6 +454,10 @@ async fn chat_completions(
                 );
                 return ApiError::blocked(blocked.message, "blocked_source")
                     .into_response();
+            }
+            Err(crate::router::RoutingError::BudgetExhausted(msg)) => {
+                metrics::observe_request(&client_id, "unrouted", &body.model, "rate_limited", 0.0, 0, 0);
+                return ApiError::rate_limited(msg).into_response();
             }
         }
     }

@@ -129,6 +129,8 @@ class PolicyEngine:
         return True
 
     def resolve(self, requested_model: str, client_id: str) -> tuple[str, str]:
+        from fwllm.metering import QuotaExceeded
+
         now_ts = self._now_ts()
         if self._safe(lambda: self._store.is_blocked(client_id, now_ts), False):
             raise BlockedError(
@@ -137,8 +139,26 @@ class PolicyEngine:
 
         candidates = self._chain_candidates()
         mapping = self._routing.model_mapping.get(requested_model, {})
-        for candidate in candidates:
-            if not any(self._violates_rule(candidate, r) for r in self._routing.rules):
+        # Check each candidate against rules, handling action
+        for idx, candidate in enumerate(candidates):
+            violating = [r for r in self._routing.rules if self._violates_rule(candidate, r)]
+            if not violating:
                 return candidate, mapping.get(candidate, requested_model)
-        head = candidates[0]
-        return head, mapping.get(head, requested_model)
+            # Handle first violating rule's action
+            rule = violating[0]
+            if rule.action.switch_to:
+                switch_to = rule.action.switch_to
+                # Validate switch_to is known
+                if switch_to in candidates:
+                    # Move switch_to to front and re-evaluate
+                    continue
+                return switch_to, mapping.get(switch_to, requested_model)
+            if rule.action.next_in_chain:
+                # Skip to next candidate
+                continue
+        # All candidates exhausted
+        raise QuotaExceeded(
+            f"all providers in chain {candidates} exceeded budget/rules",
+            limit=0,
+            scope="provider_budget",
+        )

@@ -245,6 +245,17 @@ def create_app(
 
         try:
             provider_name, concrete_model = router.resolve(body.model, client_id)
+        except QuotaExceeded as exc:
+            _metrics("rate_limited")
+            _audit_write(
+                client=client_id,
+                provider="unrouted",
+                model=body.model,
+                code="rate_limited",
+                messages=body.model_dump()["messages"],
+                response_text=str(exc),
+            )
+            raise rate_limit_error(str(exc)) from exc
         except BlockedError as exc:
             _metrics("blocked")
             _audit_write(
