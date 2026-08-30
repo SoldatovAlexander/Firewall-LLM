@@ -99,7 +99,7 @@ def test_healthz():
 
 def test_metrics_exposed():
     with _client(FakeProvider()) as c:
-        assert c.get("/metrics").status_code == 200
+        assert c.get("/metrics", headers=_headers()).status_code == 200
 
 
 # --- authentication ---------------------------------------------------------
