@@ -46,6 +46,29 @@ async def test_usage_recorded_after_completion():
     assert int(await redis.get(f"fwllm:p:tokens:mock:{day}") or 0) == 5
 
 
+
+async def test_fail_closed_rejects_when_redis_unreachable():
+    from fwllm.config import Quotas
+
+    class BrokenRedis:
+        async def ping(self): raise Exception("redis down")
+        async def get(self, k): raise Exception("redis down")
+        async def incrby(self, k, a): raise Exception("redis down")
+        async def expire(self, k, s): raise Exception("redis down")
+
+    cfg = Config(
+        server=ServerConfig(),
+        providers={"mock": ProviderConfig(base_url="http://mock.local/v1")},
+        clients={CLIENT_KEY: "alice"},
+        quotas=Quotas(client_tokens_per_day=10, backend_fail_closed=True),
+    )
+    metering = Metering(BrokenRedis(), quotas={"client_tokens_per_day": 10}, backend_fail_closed=True)
+    app = create_app(cfg, providers={"mock": FakeProvider()}, metering=metering)
+    from fastapi.testclient import TestClient as TC
+    with TC(app) as c:
+        r = c.post("/v1/chat/completions", json=_body(), headers=_headers())
+        assert r.status_code in (502, 503)
+
 async def test_quota_exceeded_returns_429_contract_error():
     quotas = Quotas(client_tokens_per_day=3)
     client, redis = _app(quotas)

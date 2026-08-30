@@ -1,6 +1,6 @@
 //! Metering unit tests (in-memory store).
 
-use fwllm_gateway::metering::{InMemoryStore, Metering};
+use fwllm_gateway::metering::{InMemoryStore, Metering, MeteringError};
 use fwllm_core::config::Quotas;
 
 fn quotas(tokens: Option<i64>, requests: Option<i64>) -> Quotas {
@@ -8,6 +8,7 @@ fn quotas(tokens: Option<i64>, requests: Option<i64>) -> Quotas {
         client_tokens_per_day: tokens,
         client_requests_per_day: requests,
         provider_tokens_per_day: None,
+        backend_fail_closed: false,
     }
 }
 
@@ -25,8 +26,7 @@ fn token_quota_exceeded_maps_to_429_scope() {
     let m = Metering::new(Box::new(InMemoryStore::default()), &quotas(Some(10), None));
     m.record("alice", "p", "m", 8, 2);
     let err = m.check_client("alice").unwrap_err();
-    assert_eq!(err.scope, "tokens");
-    assert_eq!(err.limit, 10);
+    assert!(matches!(err, MeteringError::QuotaExceeded { scope: "tokens", limit: 10 }));
 }
 
 #[test]
@@ -39,7 +39,7 @@ fn request_quota_exceeded() {
     m.check_client("bob").unwrap();
     m.record("bob", "p", "m", 1, 1);
     m.record("bob", "p", "m", 1, 1);
-    assert_eq!(m.check_client("bob").unwrap_err().scope, "requests");
+    assert!(matches!(m.check_client("bob").unwrap_err(), MeteringError::QuotaExceeded { scope: "requests", .. }));
 }
 
 #[test]

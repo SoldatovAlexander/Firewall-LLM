@@ -81,6 +81,8 @@ pub struct Quotas {
     pub client_requests_per_day: Option<i64>,
     #[serde(rename = "provider_tokens_per_day")]
     pub provider_tokens_per_day: Option<i64>,
+    #[serde(rename = "backend_fail_closed", default)]
+    pub backend_fail_closed: bool,
 }
 
 /// Threshold comparisons for routing rules.

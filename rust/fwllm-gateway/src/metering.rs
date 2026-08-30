@@ -5,6 +5,15 @@ use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, thiserror::Error)]
+pub enum MeteringError {
+    #[error("daily {scope} quota exceeded (limit={limit})")]
+    QuotaExceeded { scope: &'static str, limit: i64 },
+    #[error("metering backend unavailable: {0}")]
+    BackendUnavailable(String),
+}
+
+// Keep backwards-compatible alias for existing code
+#[derive(Debug, thiserror::Error)]
 #[error("quota exceeded: {scope}")]
 pub struct QuotaExceeded {
     pub scope: &'static str,
@@ -13,8 +22,8 @@ pub struct QuotaExceeded {
 
 /// Storage abstraction so tests can run without Redis.
 pub trait MeteringStore: Send + Sync {
-    fn incr(&self, key: &str, amount: i64) -> i64;
-    fn get(&self, key: &str) -> i64;
+    fn incr(&self, key: &str, amount: i64) -> Result<i64, String>;
+    fn get(&self, key: &str) -> Result<i64, String>;
 }
 
 pub struct InMemoryStore {
@@ -28,14 +37,14 @@ impl Default for InMemoryStore {
 }
 
 impl MeteringStore for InMemoryStore {
-    fn incr(&self, key: &str, amount: i64) -> i64 {
+    fn incr(&self, key: &str, amount: i64) -> Result<i64, String> {
         let mut map = self.counters.lock().unwrap();
         let entry = map.entry(key.to_string()).or_default();
         *entry += amount;
-        *entry
+        Ok(*entry)
     }
-    fn get(&self, key: &str) -> i64 {
-        self.counters.lock().unwrap().get(key).copied().unwrap_or(0)
+    fn get(&self, key: &str) -> Result<i64, String> {
+        Ok(self.counters.lock().unwrap().get(key).copied().unwrap_or(0))
     }
 }
 
@@ -50,19 +59,13 @@ impl RedisStore {
 }
 
 impl MeteringStore for RedisStore {
-    fn incr(&self, key: &str, amount: i64) -> i64 {
-        let mut conn = match self.client.get_connection() {
-            Ok(c) => c,
-            Err(_) => return 0, // fail-open mirrors Python behavior
-        };
-        conn.incr(key, amount).unwrap_or(0)
+    fn incr(&self, key: &str, amount: i64) -> Result<i64, String> {
+        let mut conn = self.client.get_connection().map_err(|e| e.to_string())?;
+        conn.incr(key, amount).map_err(|e| e.to_string())
     }
-    fn get(&self, key: &str) -> i64 {
-        let mut conn = match self.client.get_connection() {
-            Ok(c) => c,
-            Err(_) => return 0,
-        };
-        conn.get(key).unwrap_or(0)
+    fn get(&self, key: &str) -> Result<i64, String> {
+        let mut conn = self.client.get_connection().map_err(|e| e.to_string())?;
+        conn.get(key).map_err(|e| e.to_string())
     }
 }
 
@@ -70,6 +73,7 @@ pub struct Metering {
     store: Box<dyn MeteringStore>,
     client_tokens_per_day: Option<i64>,
     client_requests_per_day: Option<i64>,
+    backend_fail_closed: bool,
 }
 
 impl Metering {
@@ -78,26 +82,48 @@ impl Metering {
             store,
             client_tokens_per_day: quotas.client_tokens_per_day,
             client_requests_per_day: quotas.client_requests_per_day,
+            backend_fail_closed: quotas.backend_fail_closed,
         }
+    }
+
+    /// When fail-closed, a backend error is returned to the caller instead of ignored.
+    pub fn backend_fail_closed(&self) -> bool {
+        self.backend_fail_closed
     }
 
     fn day(&self) -> String {
         day_string(now_ts())
     }
 
-    /// Check daily quotas; Err -> the gateway must answer 429.
-    pub fn check_client(&self, client_id: &str) -> Result<(), QuotaExceeded> {
+    /// Check daily quotas. Err(QuotaExceeded) -> 429; Err(BackendUnavailable) when fail-closed -> 503.
+    pub fn check_client(&self, client_id: &str) -> Result<(), MeteringError> {
         let day = self.day();
         if let Some(limit) = self.client_tokens_per_day {
-            let used = self.store.get(&format!("fwllm:c:tokens:{client_id}:{day}"));
+            let used = match self.store.get(&format!("fwllm:c:tokens:{client_id}:{day}")) {
+                Ok(v) => v,
+                Err(e) => {
+                    if self.backend_fail_closed {
+                        return Err(MeteringError::BackendUnavailable(e));
+                    }
+                    return Ok(());
+                }
+            };
             if used >= limit {
-                return Err(QuotaExceeded { scope: "tokens", limit });
+                return Err(MeteringError::QuotaExceeded { scope: "tokens", limit });
             }
         }
         if let Some(limit) = self.client_requests_per_day {
-            let used = self.store.get(&format!("fwllm:c:req:{client_id}:{day}"));
+            let used = match self.store.get(&format!("fwllm:c:req:{client_id}:{day}")) {
+                Ok(v) => v,
+                Err(e) => {
+                    if self.backend_fail_closed {
+                        return Err(MeteringError::BackendUnavailable(e));
+                    }
+                    return Ok(());
+                }
+            };
             if used >= limit {
-                return Err(QuotaExceeded { scope: "requests", limit });
+                return Err(MeteringError::QuotaExceeded { scope: "requests", limit });
             }
         }
         Ok(())
@@ -113,14 +139,11 @@ impl Metering {
     ) {
         let day = self.day();
         let total = prompt + completion;
-        self.store
-            .incr(&format!("fwllm:c:tokens:{client_id}:{day}"), total);
-        self.store.incr(&format!("fwllm:c:req:{client_id}:{day}"), 1);
-        self.store
-            .incr(&format!("fwllm:p:tokens:{provider}:{day}"), total);
-        self.store.incr(&format!("fwllm:p:req:{provider}:{day}"), 1);
-        self.store
-            .incr(&format!("fwllm:m:tokens:{model}:{day}"), total);
+        let _ = self.store.incr(&format!("fwllm:c:tokens:{client_id}:{day}"), total);
+        let _ = self.store.incr(&format!("fwllm:c:req:{client_id}:{day}"), 1);
+        let _ = self.store.incr(&format!("fwllm:p:tokens:{provider}:{day}"), total);
+        let _ = self.store.incr(&format!("fwllm:p:req:{provider}:{day}"), 1);
+        let _ = self.store.incr(&format!("fwllm:m:tokens:{model}:{day}"), total);
     }
 }
 

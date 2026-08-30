@@ -460,15 +460,28 @@ async fn chat_completions(
 
     let started = Instant::now();
 
-    // quota gate -> 429
+    // quota gate -> 429, or 503 when fail-closed and backend unreachable
     if let Some(metering) = &state.metering {
-        if let Err(quota_err) = metering.check_client(&client_id) {
-            metrics::observe_request(&client_id, &provider_name, &body.model, "rate_limited", 0.0, 0, 0);
-            return ApiError::rate_limited(format!(
-                "daily {} quota exceeded ({}/{})",
-                quota_err.scope, 0, quota_err.limit
-            ))
-            .into_response();
+        match metering.check_client(&client_id) {
+            Ok(()) => {}
+            Err(crate::metering::MeteringError::QuotaExceeded { scope, limit }) => {
+                metrics::observe_request(&client_id, &provider_name, &body.model, "rate_limited", 0.0, 0, 0);
+                return ApiError::rate_limited(format!("daily {scope} quota exceeded (limit={limit})"))
+                    .into_response();
+            }
+            Err(crate::metering::MeteringError::BackendUnavailable(msg)) => {
+                if metering.backend_fail_closed() {
+                    metrics::observe_request(&client_id, &provider_name, &body.model, "backend_error", 0.0, 0, 0);
+                    return ApiError {
+                        status: axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                        kind: "rate_limit_error",
+                        message: format!("metering backend unavailable: {msg}"),
+                        code: Some("backend_unavailable"),
+                        details: None,
+                    }.into_response();
+                }
+                // fail-open: ignore backend errors
+            }
         }
     }
 

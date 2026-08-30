@@ -36,6 +36,8 @@ class Quotas(BaseModel):
     client_tokens_per_day: int | None = None
     client_requests_per_day: int | None = None
     provider_tokens_per_day: int | None = None
+    # fail-closed: reject requests if metering backend (Redis) is unreachable
+    backend_fail_closed: bool = False
 
 
 class DLPConfig(BaseModel):

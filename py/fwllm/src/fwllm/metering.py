@@ -38,11 +38,13 @@ class Metering:
         *,
         clock: Callable[[], datetime] | None = None,
         subscribers: list[Subscriber] | None = None,
+        backend_fail_closed: bool = False,
     ):
         self._redis = redis
         self._quotas = quotas or {}
         self._clock = clock or (lambda: datetime.now(UTC))
         self._subscribers = list(subscribers or [])
+        self._backend_fail_closed = backend_fail_closed
 
     def subscribe(self, subscriber: Subscriber) -> None:
         self._subscribers.append(subscriber)
@@ -54,6 +56,11 @@ class Metering:
         for subscriber in self._subscribers:
             subscriber(event)
 
+    async def _ensure_ready(self) -> None:
+        """When fail-closed, verify the backend is reachable before serving."""
+        if self._backend_fail_closed:
+            await self._redis.ping()
+
     @staticmethod
     async def _incr(redis: Any, key: str, amount: int = 1) -> int:
         value: int = await redis.incrby(key, amount)
@@ -61,6 +68,7 @@ class Metering:
         return value
 
     async def check_client(self, client_id: str) -> None:
+        await self._ensure_ready()
         day = self._day()
         token_limit = self._quotas.get("client_tokens_per_day")
         if token_limit is not None:

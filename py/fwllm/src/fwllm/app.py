@@ -136,6 +136,7 @@ def create_app(
         metering = Metering(
             aioredis.from_url(config.redis_url, decode_responses=True),
             quotas=config.quotas.model_dump(exclude_none=True),
+            backend_fail_closed=config.quotas.backend_fail_closed,
         )
     app.state.metering = metering
     if inspectors is None:
@@ -286,11 +287,24 @@ def create_app(
             _audit_now("blocked", str(exc), messages=body.model_dump()["messages"])
             raise blocked_error(str(exc), reason=exc.reason) from exc
         try:
-            await _metering_safe(metering.check_client(client_id))
+            if metering._backend_fail_closed:
+                await metering.check_client(client_id)
+            else:
+                await _metering_safe(metering.check_client(client_id))
         except QuotaExceeded as exc:
             _metrics("rate_limited")
             _audit_now("rate_limited", str(exc))
             raise rate_limit_error(str(exc)) from exc
+        except Exception as exc:
+            # fail-closed: backend unreachable -> 503 service unavailable
+            _metrics("backend_error")
+            _audit_now("backend_error", str(exc))
+            raise ApiError(
+                status=503,
+                type_="rate_limit_error",
+                message=f"metering backend unavailable: {exc}",
+                code="backend_unavailable",
+            ) from exc
 
         if not body.stream:
             try:
