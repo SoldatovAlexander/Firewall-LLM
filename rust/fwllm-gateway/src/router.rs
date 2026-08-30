@@ -54,7 +54,7 @@ pub struct PolicyEngine {
     override_provider: Option<String>,
     override_until: f64,
     blocked_sources: HashMap<String, f64>,
-    attack_times: Vec<(String, f64)>,
+    attack_times: HashMap<String, Vec<f64>>,
     provider_tokens: HashMap<(String, String), i64>,
 }
 
@@ -70,7 +70,7 @@ impl PolicyEngine {
             override_provider: None,
             override_until: 0.0,
             blocked_sources: HashMap::new(),
-            attack_times: Vec::new(),
+            attack_times: HashMap::new(),
             provider_tokens: HashMap::new(),
         }
     }
@@ -107,12 +107,13 @@ impl PolicyEngine {
         }
         let now = (self.clock)();
         let window_start = now - af.window_seconds as f64;
-        self.attack_times.retain(|(_, ts)| *ts >= window_start);
-        self.attack_times.push((client.to_string(), now));
-        if self.attack_times.len() < af.count {
+        let entry = self.attack_times.entry(client.to_string()).or_default();
+        entry.retain(|ts| *ts >= window_start);
+        entry.push(now);
+        if entry.len() < af.count {
             return;
         }
-        self.attack_times.clear();
+        entry.clear();
         if af.block_source && !client.is_empty() {
             self.blocked_sources
                 .insert(client.to_string(), now + af.block_ttl_seconds as f64);

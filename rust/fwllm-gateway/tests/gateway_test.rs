@@ -96,6 +96,7 @@ async fn metrics_endpoint_renders() {
         .oneshot(
             axum::http::Request::builder()
                 .uri("/metrics")
+                .header("authorization", auth_header().1)
                 .body(Body::empty())
                 .unwrap(),
         )

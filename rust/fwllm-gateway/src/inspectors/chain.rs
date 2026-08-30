@@ -13,6 +13,7 @@ pub struct ChainState {
 pub struct InspectorChain {
     cfg: InspectorsConfig,
     ml: Option<MlInjectionInspector>,
+    publish: Option<std::sync::Arc<dyn Fn(String, String, String) + Send + Sync>>,
 }
 
 impl InspectorChain {
@@ -24,7 +25,7 @@ impl InspectorChain {
                 ))?;
             Some(MlInjectionInspector::new(classifier, cfg.injection.ml.threshold as f32, cfg.injection.block_severity_gte.clone(), cfg.injection.mode.clone()))
         } else { None };
-        Ok(Self { cfg: cfg.clone(), ml })
+        Ok(Self { cfg: cfg.clone(), ml, publish: None })
     }
 
     #[cfg(test)]
@@ -32,18 +33,33 @@ impl InspectorChain {
         let ml = if cfg.injection.ml.enabled {
             Some(MlInjectionInspector::new(classifier, cfg.injection.ml.threshold as f32, cfg.injection.block_severity_gte.clone(), cfg.injection.mode.clone()))
         } else { None };
-        Self { cfg: cfg.clone(), ml }
+        Self { cfg: cfg.clone(), ml, publish: None }
+    }
+
+    pub fn set_publish<F>(&mut self, f: F)
+    where
+        F: Fn(String, String, String) + Send + Sync + 'static,
+    {
+        self.publish = Some(std::sync::Arc::new(f));
     }
 
     /// Fallback for tests and non-strict contexts: never fails, logs warning.
     pub fn from_config_or_default(cfg: &InspectorsConfig) -> Self {
         Self::from_config(cfg).unwrap_or_else(|e| {
             tracing::warn!("ML classifier not loaded, continuing without it: {e}");
-            Self { cfg: cfg.clone(), ml: None }
+            Self { cfg: cfg.clone(), ml: None, publish: None }
         })
     }
 
     pub fn process_request(&self, payload: &mut serde_json::Value) -> Result<ChainState, ApiError> {
+        self.process_request_with_client(payload, None)
+    }
+
+    pub fn process_request_with_client(
+        &self,
+        payload: &mut serde_json::Value,
+        client_id: Option<&str>,
+    ) -> Result<ChainState, ApiError> {
         // 1. injection (signatures)
         let mut all_findings: Vec<(&'static str, &'static str)> = Vec::new();
         if self.cfg.injection.mode != "off" {
@@ -59,6 +75,9 @@ impl InspectorChain {
                 }
             }
             if let Some((rule, severity)) = verdict(&all_findings, &self.cfg.injection.block_severity_gte) {
+                if let Some(publish) = &self.publish {
+                    publish(severity.to_string(), rule.to_string(), client_id.unwrap_or("").to_string());
+                }
                 if self.cfg.injection.mode == "block" {
                     return Err(ApiError::blocked(format!("prompt injection detected ({rule}, severity={severity})"), "injection"));
                 }

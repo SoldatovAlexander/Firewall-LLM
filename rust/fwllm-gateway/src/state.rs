@@ -12,7 +12,7 @@ pub struct AppState {
     pub clients: BTreeMap<String, String>,
     pub admin_clients: BTreeMap<String, String>,
     pub providers: Arc<ProviderRegistry>,
-    pub router: tokio::sync::Mutex<crate::router::PolicyEngine>,
+    pub router: std::sync::Arc<tokio::sync::Mutex<crate::router::PolicyEngine>>,
     /// None when redis is unreachable at startup (fail-open accounting).
     pub metering: Option<crate::metering::Metering>,
     pub audit: Option<Arc<crate::audit::AuditLog>>,
@@ -93,10 +93,36 @@ impl AppState {
             panic!("{msg}");
         }
 
-        let inspectors = std::sync::Arc::new(
+        let router = std::sync::Arc::new(tokio::sync::Mutex::new(
+            crate::router::PolicyEngine::new(routing),
+        ));
+        let mut inspectors_chain =
             crate::inspectors::chain::InspectorChain::from_config(&config.inspectors)
-                .unwrap_or_else(|e| panic!("failed to build inspectors: {e}")),
-        );
+                .unwrap_or_else(|e| panic!("failed to build inspectors: {e}"));
+        {
+            let router_clone = router.clone();
+            inspectors_chain.set_publish(move |severity, _rule, client_id| {
+                let router = router_clone.clone();
+                let severity = severity.clone();
+                let client_id = client_id.clone();
+                // Try to spawn on current runtime, otherwise block
+                if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                    handle.spawn(async move {
+                        router.lock().await.on_attack_detected(&severity, &client_id);
+                    });
+                } else {
+                    // For tests without runtime, use blocking
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap();
+                    rt.block_on(async {
+                        router.lock().await.on_attack_detected(&severity, &client_id);
+                    });
+                }
+            });
+        }
+        let inspectors = std::sync::Arc::new(inspectors_chain);
 
         let metering = metering_override.or_else(|| {
             crate::metering::RedisStore::new(&config.redis_url).ok().map(|store| {
@@ -110,7 +136,7 @@ impl AppState {
             admin_clients: config.admin_clients.clone(),
             config,
             providers: registry,
-            router: tokio::sync::Mutex::new(crate::router::PolicyEngine::new(routing)),
+            router,
             metering,
             audit,
             ingress,

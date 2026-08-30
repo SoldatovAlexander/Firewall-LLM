@@ -544,7 +544,10 @@ async fn chat_completions(
         "stream": body.stream,
     });
 
-    let chain_state = match state.inspectors.process_request(&mut payload) {
+    let chain_state = match state
+        .inspectors
+        .process_request_with_client(&mut payload, Some(&client_id))
+    {
         Ok(s) => s,
         Err(e) => {
             metrics::observe_request(&client_id, &provider_name, &body.model, "blocked", 0.0, 0, 0);

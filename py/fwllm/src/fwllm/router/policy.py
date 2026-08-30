@@ -40,7 +40,7 @@ class PolicyEngine:
         self._routing = routing
         self._clock = clock or _default_clock
         self._store = store or InMemoryRouterStore()
-        self._attack_times: list[tuple[str, datetime]] = []
+        self._attack_times: dict[str, list[datetime]] = {}
 
     @staticmethod
     def validate_routing(routing: RoutingConfig, known_providers: list[str]) -> None:
@@ -90,13 +90,14 @@ class PolicyEngine:
         now = self._clock()
         window_start = now.timestamp() - af.window_seconds
         source = str(event.data.get("client", ""))
-        self._attack_times = [
-            pair for pair in self._attack_times if pair[1].timestamp() >= window_start
-        ]
-        self._attack_times.append((source, now))
-        if len(self._attack_times) < af.count:
+        # Per-client window
+        lst = self._attack_times.get(source, [])
+        lst = [ts for ts in lst if ts.timestamp() >= window_start]
+        lst.append(now)
+        self._attack_times[source] = lst
+        if len(lst) < af.count:
             return
-        del self._attack_times[:]  # window consumed - one reaction per burst
+        lst.clear()
         if af.block_source and source:
             until = now.timestamp() + af.block_ttl_seconds
             self._safe(lambda: self._store.block_source(source, until), None)
