@@ -10,3 +10,5 @@
 - [Наблюдаемость](observability.md) — Prometheus `/metrics`, импорт в Grafana
 - [Ingress-туннель](ingress.md) — `wss://:8443`, токены, агент, маскировка
 - [Развёртывание](deployment.md) — Docker Compose, Helm, сертификаты
+
+- [Простое описание сервиса](../../docs/SERVICE_DESCRIPTION_SIMPLE.md) — как работает с примерами

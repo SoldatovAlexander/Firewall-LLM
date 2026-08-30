@@ -10,3 +10,5 @@
 - [Observability](observability.md) — Prometheus `/metrics`, Grafana import
 - [Ingress Tunnel](ingress.md) — `wss://:8443`, tokens, agent, masking
 - [Deployment](deployment.md) — Docker Compose, Helm, certs
+
+- [Service Description (simple, non-technical)](../../docs/SERVICE_DESCRIPTION_SIMPLE.md) — how it works with examples
