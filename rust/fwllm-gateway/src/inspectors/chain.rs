@@ -16,12 +16,15 @@ pub struct InspectorChain {
 }
 
 impl InspectorChain {
-    pub fn from_config(cfg: &InspectorsConfig) -> Self {
+    pub fn from_config(cfg: &InspectorsConfig) -> Result<Self, fwllm_core::config::ConfigError> {
         let ml = if cfg.injection.ml.enabled {
-            crate::inspectors::ml::try_load_classifier(&cfg.injection.ml.model_dir)
-                .map(|c| MlInjectionInspector::new(c, cfg.injection.ml.threshold as f32, cfg.injection.block_severity_gte.clone(), cfg.injection.mode.clone()))
+            let classifier = crate::inspectors::ml::try_load_classifier(&cfg.injection.ml.model_dir)
+                .ok_or_else(|| fwllm_core::config::ConfigError::Validation(
+                    "injection.ml is enabled but no model could be loaded - provide a valid model_dir with model.onnx/tokenizer.json".to_string()
+                ))?;
+            Some(MlInjectionInspector::new(classifier, cfg.injection.ml.threshold as f32, cfg.injection.block_severity_gte.clone(), cfg.injection.mode.clone()))
         } else { None };
-        Self { cfg: cfg.clone(), ml }
+        Ok(Self { cfg: cfg.clone(), ml })
     }
 
     #[cfg(test)]
@@ -30,6 +33,14 @@ impl InspectorChain {
             Some(MlInjectionInspector::new(classifier, cfg.injection.ml.threshold as f32, cfg.injection.block_severity_gte.clone(), cfg.injection.mode.clone()))
         } else { None };
         Self { cfg: cfg.clone(), ml }
+    }
+
+    /// Fallback for tests and non-strict contexts: never fails, logs warning.
+    pub fn from_config_or_default(cfg: &InspectorsConfig) -> Self {
+        Self::from_config(cfg).unwrap_or_else(|e| {
+            tracing::warn!("ML classifier not loaded, continuing without it: {e}");
+            Self { cfg: cfg.clone(), ml: None }
+        })
     }
 
     pub fn process_request(&self, payload: &mut serde_json::Value) -> Result<ChainState, ApiError> {

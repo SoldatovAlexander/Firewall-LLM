@@ -93,7 +93,10 @@ impl AppState {
             panic!("{msg}");
         }
 
-        let inspectors = std::sync::Arc::new(crate::inspectors::chain::InspectorChain::from_config(&config.inspectors));
+        let inspectors = std::sync::Arc::new(
+            crate::inspectors::chain::InspectorChain::from_config(&config.inspectors)
+                .unwrap_or_else(|e| panic!("failed to build inspectors: {e}")),
+        );
 
         let metering = metering_override.or_else(|| {
             crate::metering::RedisStore::new(&config.redis_url).ok().map(|store| {

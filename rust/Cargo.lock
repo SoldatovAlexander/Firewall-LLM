@@ -825,6 +825,7 @@ dependencies = [
  "http-body-util",
  "ndarray",
  "ort",
+ "parking_lot",
  "prometheus",
  "rand 0.8.8",
  "rcgen",
