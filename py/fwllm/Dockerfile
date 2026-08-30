@@ -6,9 +6,9 @@ RUN apt-get update \
 
 WORKDIR /app
 
-COPY pyproject.toml ./
-COPY src ./src
-COPY enterprise ./enterprise
+COPY py/fwllm/pyproject.toml ./
+COPY py/fwllm/src ./src
+COPY py/fwllm-enterprise ./enterprise
 # rtcompat: CPU-compatible polars build for servers without AVX2
 RUN pip install --no-cache-dir "polars[rtcompat]" \
     && pip install --no-cache-dir onnxruntime tokenizers \

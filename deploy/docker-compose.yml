@@ -5,7 +5,9 @@ services:
     restart: unless-stopped
 
   gateway:
-    build: ./gateway
+    build:
+      context: ../
+      dockerfile: py/fwllm/Dockerfile
     container_name: fwllm-gateway
     restart: unless-stopped
     ports:
@@ -19,7 +21,9 @@ services:
       - ./data:/data
 
   gateway-rust:
-    build: ./gateway-rust
+    build:
+      context: ../
+      dockerfile: rust/fwllm-gateway/Dockerfile
     container_name: fwllm-gateway-rust
     restart: unless-stopped
     ports:
