@@ -211,8 +211,15 @@ async fn handle_ingress_socket(
     }
 }
 
-async fn metrics_handler() -> String {
-    metrics::render_metrics()
+async fn metrics_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(err) = require_admin(&state, &headers).await {
+        return err.into_response();
+    }
+    let body = metrics::render_metrics();
+    ([(axum::http::header::CONTENT_TYPE, "text/plain; version=0.0.4")], body).into_response()
 }
 
 async fn healthz() -> Json<Value> {

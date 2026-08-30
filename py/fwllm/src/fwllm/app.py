@@ -433,5 +433,15 @@ def create_app(
 
         return StreamingResponse(sse(), media_type="text/event-stream")
 
-    app.mount("/metrics", make_asgi_app())
+    from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
+    from fastapi.responses import Response as FastAPIResponse
+
+    @app.get("/metrics")
+    async def metrics(request: Request) -> FastAPIResponse:
+        try:
+            await _require_admin(request)
+        except ApiError as exc:
+            return exc.response()
+        return FastAPIResponse(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
+
     return app
