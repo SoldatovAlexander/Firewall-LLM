@@ -17,9 +17,7 @@ import httpx
 def build_http_client(
     base_url: str, proxy_url: str | None, timeout: float = 120.0
 ) -> httpx.AsyncClient:
-    kwargs: dict[str, Any] = {"base_url": base_url, "timeout": timeout}
+    kwargs: dict[str, Any] = {"base_url": base_url, "timeout": timeout, "trust_env": False}
     if proxy_url:
         kwargs["proxy"] = proxy_url
-        # trust_env off: explicit proxy must not be overridden by env vars
-        kwargs["trust_env"] = False
     return httpx.AsyncClient(**kwargs)

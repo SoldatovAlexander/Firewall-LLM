@@ -49,6 +49,7 @@ impl OpenAiCompatProvider {
     ) -> Self {
         let http = reqwest::Client::builder()
             .timeout(timeout)
+            .no_proxy()
             .build()
             .expect("reqwest client");
         Self {
