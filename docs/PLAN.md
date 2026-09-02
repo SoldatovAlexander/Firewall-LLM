@@ -115,6 +115,21 @@ FastAPI TestClient/httpx ASGI, Docker Compose (Prometheus, Grafana, Redis).
 
 ## Фаза 9. Стабилизация
 
+**Статус: завершена** — нагрузочное 1577 req @79 rps, Docker Compose + Helm, FSL-1.1-MIT, dev-server автостарт `unless-stopped`.
+
+## Фаза 10. Ingress-туннель (wss :8443, self-signed, агент)
+
+| Задача | Тесты |
+|---|---|
+| Токены `POST /admin/ingress/tokens` + `GET /admin/ingress/agents` | 4 теста |
+| TLS `:8443` + `wss /ingress` + `mask_for_tunnel` | 2 теста |
+| Агент `fwllm-agent` (wss, маскировка) | 2 теста |
+| Egress `tunnel` через `IngressRegistry` канал | E2E `httpbin` |
+
+**DoD:** `wss://:8443/ingress` требует валидный `Bearer`, `Via/X-Forwarded` стёрты.
+
+## Фаза 9. Стабилизация
+
 - Нагрузочное тестирование (k6/locust): latency overhead шлюза
 - Docker Compose полного стенда + Helm-заготовка
 - Документация: развёртывание on-prem, написание политик
