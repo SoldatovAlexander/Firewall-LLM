@@ -1,0 +1,5 @@
+# Simple reverse proxy — all detection stays in gateway
+:443 {
+	tls /certs/server.crt /certs/server.key
+	reverse_proxy gateway:8080
+}

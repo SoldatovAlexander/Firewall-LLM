@@ -63,3 +63,14 @@ services:
     environment:
       GF_SECURITY_ADMIN_USER: admin
       GF_SECURITY_ADMIN_PASSWORD: "${GRAFANA_ADMIN_PASSWORD:?set GRAFANA_ADMIN_PASSWORD}"
+
+  proxy:
+    image: caddy:2-alpine
+    container_name: fwllm-proxy
+    restart: unless-stopped
+    profiles: ["proxy"]
+    ports:
+      - "443:443"
+    volumes:
+      - ./proxy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./certs:/certs:ro
