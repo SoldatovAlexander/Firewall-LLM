@@ -145,6 +145,38 @@ def test_stream_restore_flush_emits_remainder():
     assert flushed != ""  # never silently drop user-visible text
 
 
+def test_dlp_parity_corpus_ru152():
+    """0.1.1: locked parity corpus — every ru_152-only type must mask and
+    restore. The Rust branch must satisfy the same corpus (see
+    inspectors_test.rs::dlp_parity_corpus_ru152)."""
+    cases = [
+        ("паспорт 45 00 123456 выдан", "PASSPORT"),
+        ("паспорт 4500 123456", "PASSPORT"),
+        ("СНИЛС 112-233-445 95", "SNILS"),
+        ("ИНН 7707083893", "INN"),
+        ("ИНН 500100732259", "INN"),
+        ("написать Иван Иванов завтра", "PERSON"),
+        ("мой ник ivan_dev на Habr", "ONLINE_ACCOUNT"),
+        ("login petrov on forum", "ONLINE_ACCOUNT"),
+        ("смотри github.com/ivan_dev", "PROFILE_URL"),
+        ("пиши в t.me/ivanov", "PROFILE_URL"),
+        ("свяжись @ivan_dev срочно", "SOCIAL_HANDLE"),
+        ("логин: petrov вошел", "USERNAME"),
+    ]
+    for text, typ in cases:
+        dlp = DLPInspector(DLPConfig(mode="mask", restore_policy="restore"))
+        payload = _payload(f"пиши {text} ок")
+        dlp.process_request(payload)
+        masked = payload["messages"][0]["content"]
+        assert f"[{typ}_" in masked, f"{typ}: {masked}"
+        assert text not in masked
+        # restore round-trips through a fresh vault scope
+        dlp2 = DLPInspector(DLPConfig(mode="mask", restore_policy="restore"))
+        payload2 = _payload(f"пиши {text} ок")
+        ctx2 = dlp2.process_request(payload2)
+        assert dlp2.process_response(payload2["messages"][0]["content"], ctx2) == f"пиши {text} ок"
+
+
 def test_dlp_off_mode_leaves_everything_untouched():
     dlp = DLPInspector(DLPConfig(mode="off", restore_policy="restore"))
     payload = _payload("email ivan@mail.ru")

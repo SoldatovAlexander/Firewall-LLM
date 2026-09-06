@@ -8,19 +8,22 @@ Chain: `injection (signatures)` → `ML` → `DLP`.
 
 **DLP:** `mode: block/mask/log/off`, `restore_policy: mask/restore`, `profile: ru_152`. `sanitize_with_scope` → `vault` per request.
 
-## DLP parity: Python vs Rust (release 0.1.0)
+## DLP parity: Python vs Rust (0.1.1 — detector parity)
 
-Both branches: per-request vault, `block/mask/log/off` modes, `restore_policy: mask/restore`, streaming token reassembly (R13). **Detector coverage differs** — a known release limitation, not parity:
+Both branches: per-request vault, `block/mask/log/off` modes, `restore_policy: mask/restore`, streaming token reassembly (R13). Rust detectors mirror the LightAnon `ru_152` profile verbatim (patterns ported 1:1, same order); a shared 12-sample corpus is locked by both branches' tests (`test_dlp_parity_corpus_ru152`).
 
 | Data type | Python (LightAnon `ru_152`) | Rust (regex) |
 |---|---|---|
 | EMAIL | ✅ | ✅ |
 | PHONE (RU) | ✅ | ✅ |
 | CARD (13–19 digits) | ✅ | ✅ |
-| PASSPORT (RU) | ✅ | ❌ |
-| SNILS | ✅ | ❌ |
-| INN | ✅ | ❌ |
-| PERSON (RU names) | ✅ | ❌ |
-| ONLINE_ACCOUNT / PROFILE_URL / SOCIAL_HANDLE / USERNAME | ✅ | ❌ |
+| PASSPORT (RU) | ✅ | ✅ |
+| SNILS | ✅ | ✅ |
+| INN (10/12 digits) | ✅ | ✅ |
+| PERSON (RU names) | ✅ | ✅ |
+| ONLINE_ACCOUNT (RU+EN) | ✅ | ✅ |
+| PROFILE_URL | ✅ | ✅ |
+| SOCIAL_HANDLE | ✅ | ✅ |
+| USERNAME (labelled) | ✅ | ✅ |
 
-The Python side is defined by the LightAnon pin in `py/fwllm` (`ru_152` = 11 types). Extending the Rust side is out of 0.1.0 scope; until then only `injection`/policies apply to those types on the Rust gateway. Legal sufficiency of either side is not assessed by this release.
+Known divergences (documented, erring toward over-mask): the regex crate has no look-around — PERSON's trailing `(?!\w)` and SOCIAL_HANDLE's leading `(?<![\w.%+-])` are dropped; the latter's safety rests on ordering (EMAIL runs first, `ivan@mail.ru` never fragments — covered by test). `dlp.profile` still does not switch detector sets in Rust. Legal sufficiency of either side is not assessed.
