@@ -39,10 +39,15 @@ impl AppState {
         audit: Option<Arc<crate::audit::AuditLog>>,
     ) -> Arc<Self> {
         let ingress = crate::ingress::shared_registry();
+        // Egress transport is validated up front: unsupported modes and bad
+        // proxy URLs abort startup instead of silently going direct (R02).
+        let http = crate::providers::build_client(
+            &config.egress,
+            Duration::from_secs_f64(config.server.request_timeout_seconds),
+        )
+        .unwrap_or_else(|e| panic!("invalid egress config: {e}"));
         let registry = providers.unwrap_or_else(|| {
             let mut map = ProviderRegistry::new();
-            let timeout =
-                Duration::from_secs_f64(config.server.request_timeout_seconds);
             for (name, pcfg) in &config.providers {
                 let provider: Arc<dyn crate::providers::Provider> =
                     match pcfg.provider_type.as_str() {
@@ -57,25 +62,29 @@ impl AppState {
                                 ingress.clone(),
                             ))
                         }
-                        "openrouter" => Arc::new(crate::providers::OpenAiCompatProvider::new(
-                            pcfg.base_url.clone(),
-                            pcfg.api_key.clone(),
-                            timeout,
-                            vec![
-                                (
-                                    "HTTP-Referer".to_string(),
-                                    "https://github.com/SoldatovAlexander/Firewall-LLM"
-                                        .to_string(),
-                                ),
-                                ("X-Title".to_string(), "Firewall LLM".to_string()),
-                            ],
-                        )),
-                        _ => Arc::new(crate::providers::OpenAiCompatProvider::new(
-                            pcfg.base_url.clone(),
-                            pcfg.api_key.clone(),
-                            timeout,
-                            Vec::new(),
-                        )),
+                        "openrouter" => Arc::new(
+                            crate::providers::OpenAiCompatProvider::with_client(
+                                pcfg.base_url.clone(),
+                                pcfg.api_key.clone(),
+                                vec![
+                                    (
+                                        "HTTP-Referer".to_string(),
+                                        "https://github.com/SoldatovAlexander/Firewall-LLM"
+                                            .to_string(),
+                                    ),
+                                    ("X-Title".to_string(), "Firewall LLM".to_string()),
+                                ],
+                                http.clone(),
+                            ),
+                        ),
+                        _ => Arc::new(
+                            crate::providers::OpenAiCompatProvider::with_client(
+                                pcfg.base_url.clone(),
+                                pcfg.api_key.clone(),
+                                Vec::new(),
+                                http.clone(),
+                            ),
+                        ),
                     };
                 map.insert(name.clone(), provider);
             }

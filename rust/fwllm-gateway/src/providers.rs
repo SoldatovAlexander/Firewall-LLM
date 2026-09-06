@@ -40,7 +40,52 @@ pub struct OpenAiCompatProvider {
     extra_headers: Vec<(String, String)>,
 }
 
+/// Build an HTTP client honoring the validated egress policy.
+///
+/// - `direct` → no proxy, env proxies ignored;
+/// - `single_proxy` → the configured proxy, validation errors returned;
+/// - anything else → rejected here, before any listener starts.
+pub fn build_client(
+    egress: &fwllm_core::config::EgressConfig,
+    timeout: Duration,
+) -> Result<reqwest::Client, String> {
+    let mut builder = reqwest::Client::builder().timeout(timeout);
+    match egress.mode.as_str() {
+        "direct" => {
+            builder = builder.no_proxy();
+        }
+        "single_proxy" => {
+            let url = egress.proxy_url.as_deref().ok_or_else(|| {
+                "egress.mode=single_proxy requires proxy_url".to_string()
+            })?;
+            let proxy = reqwest::Proxy::all(url)
+                .map_err(|e| format!("invalid egress proxy_url: {e}"))?;
+            builder = builder.proxy(proxy);
+        }
+        other => {
+            return Err(format!(
+                "unsupported egress.mode '{other}' in this build"
+            ));
+        }
+    }
+    builder.build().map_err(|e| format!("http client: {e}"))
+}
+
 impl OpenAiCompatProvider {
+    pub fn with_client(
+        base_url: impl Into<String>,
+        api_key: Option<String>,
+        extra_headers: Vec<(String, String)>,
+        http: reqwest::Client,
+    ) -> Self {
+        Self {
+            http,
+            base_url: base_url.into().trim_end_matches('/').to_string(),
+            api_key,
+            extra_headers,
+        }
+    }
+
     pub fn new(
         base_url: impl Into<String>,
         api_key: Option<String>,
