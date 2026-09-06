@@ -24,6 +24,15 @@ def test_default_is_direct(monkeypatch):
     assert "proxy" not in captured
 
 
+def test_single_proxy_socks_url_builds_client():
+    """Live egress needs SOCKS (only working public proxies); without
+    httpx[socks] this raises ImportError and single_proxy is dead."""
+    import httpx
+
+    client = build_http_client("http://api.test/v1", "socks5h://127.0.0.1:1080")
+    assert isinstance(client, httpx.AsyncClient)
+
+
 def test_single_proxy_mode_passes_proxy(monkeypatch):
     import fwllm.egress as egress
 

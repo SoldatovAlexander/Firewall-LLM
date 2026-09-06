@@ -9,6 +9,112 @@ use std::sync::{
 };
 use std::time::Duration;
 
+/// Minimal SOCKS5 proxy (no auth): handshake, CONNECT, bidirectional relay.
+async fn spawn_socks5(hits: Arc<AtomicUsize>) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut sock, _)) = listener.accept().await else {
+                break;
+            };
+            let hits = hits.clone();
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 512];
+                // greeting: VER, NMETHODS, METHODS
+                let n = sock.read(&mut buf).await.unwrap_or(0);
+                if n < 2 || buf[0] != 0x05 {
+                    return;
+                }
+                sock.write_all(&[0x05, 0x00]).await.unwrap(); // no auth
+                // request: VER CMD RSV ATYP ADDR PORT
+                let n = sock.read(&mut buf).await.unwrap_or(0);
+                if n < 7 || buf[0] != 0x05 || buf[1] != 0x01 {
+                    return;
+                }
+                let (host, port, next) = match buf[3] {
+                    0x01 => {
+                        let ip = std::net::Ipv4Addr::new(buf[4], buf[5], buf[6], buf[7]);
+                        (ip.to_string(), u16::from_be_bytes([buf[8], buf[9]]), 10)
+                    }
+                    0x03 => {
+                        let len = buf[4] as usize;
+                        let host = String::from_utf8_lossy(&buf[5..5 + len]).to_string();
+                        let port = u16::from_be_bytes([buf[5 + len], buf[6 + len]]);
+                        (host, port, 7 + len)
+                    }
+                    _ => return,
+                };
+                let _ = next;
+                let mut upstream =
+                    match tokio::net::TcpStream::connect((host.as_str(), port)).await {
+                        Ok(s) => s,
+                        Err(_) => return,
+                    };
+                hits.fetch_add(1, Ordering::SeqCst);
+                sock.write_all(&[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
+                    .await
+                    .unwrap();
+                let _ = tokio::io::copy_bidirectional(&mut sock, &mut upstream).await;
+            });
+        }
+    });
+    format!("socks5h://{addr}")
+}
+
+#[tokio::test]
+async fn socks_proxy_carries_upstream_request() {
+    // Live egress needs SOCKS (the only working public proxies); without
+    // reqwest/socks the request fails and single_proxy is dead.
+    let proxy_hits = Arc::new(AtomicUsize::new(0));
+    let proxy_url = spawn_socks5(proxy_hits.clone()).await;
+
+    // Plain HTTP origin server (no TLS) behind the proxy.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut sock, _)) = listener.accept().await else {
+                break;
+            };
+            tokio::spawn(async move {
+                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                let mut buf = vec![0u8; 4096];
+                let _ = sock.read(&mut buf).await;
+                let body = b"proxied-ok";
+                let _ = sock
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                            body.len()
+                        )
+                        .as_bytes(),
+                    )
+                    .await;
+                let _ = sock.write_all(body).await;
+            });
+        }
+    });
+
+    let cfg = EgressConfig {
+        mode: "single_proxy".to_string(),
+        proxy_url: Some(proxy_url),
+    };
+    let client = build_client(&cfg, Duration::from_secs(10)).expect("client builds");
+    let text = client
+        .get(format!("http://{addr}/"))
+        .send()
+        .await
+        .expect("request via SOCKS proxy works")
+        .text()
+        .await
+        .unwrap();
+    assert_eq!(text, "proxied-ok");
+    assert_eq!(proxy_hits.load(Ordering::SeqCst), 1);
+}
+
 /// Minimal counting HTTP proxy: answers absolute-form requests with canned body.
 async fn spawn_counting_proxy(body: &'static str) -> (String, Arc<AtomicUsize>) {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
