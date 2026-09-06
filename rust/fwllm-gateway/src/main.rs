@@ -3,7 +3,9 @@
 
 use std::path::{Path, PathBuf};
 
-fn ensure_self_signed_certs(dir: &Path) -> anyhow::Result<(PathBuf, PathBuf)> {
+fn ensure_self_signed_certs(dir: &Path, sans: &[String]) -> anyhow::Result<(PathBuf, PathBuf)> {
+    use std::os::unix::fs::OpenOptionsExt;
+
     let cert_path = dir.join("server.crt");
     let key_path = dir.join("server.key");
     let ca_path = dir.join("ca.crt");
@@ -11,18 +13,19 @@ fn ensure_self_signed_certs(dir: &Path) -> anyhow::Result<(PathBuf, PathBuf)> {
         return Ok((cert_path, key_path));
     }
     std::fs::create_dir_all(dir)?;
-    let cert = rcgen::generate_simple_self_signed(vec![
-        "localhost".to_string(),
-        "fwllm-gateway".to_string(),
-        "192.168.88.101".to_string(),
-    ])?;
+    // R10: SANs come from config, no hardcoded addresses. Dev-only self-signed.
+    let cert = rcgen::generate_simple_self_signed(sans.to_vec())?;
     let cert_pem = cert.cert.pem();
     let key_pem = cert.key_pair.serialize_pem();
     // For self-signed, ca.crt == server.crt
     std::fs::write(&cert_path, &cert_pem)?;
-    std::fs::write(&key_path, &key_pem)?;
+    // R10: private key with 0600, never world-readable
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true).mode(0o600);
+    use std::io::Write;
+    opts.open(&key_path)?.write_all(key_pem.as_bytes())?;
     std::fs::write(&ca_path, &cert_pem)?;
-    tracing::info!("generated self-signed certs in {}", dir.display());
+    tracing::info!("generated self-signed dev certs in {}", dir.display());
     Ok((cert_path, key_path))
 }
 
@@ -49,44 +52,49 @@ async fn main() {
         }
     };
     let addr = format!("{}:{}", config.server.host, config.server.port);
-    let ingress_addr = std::env::var("FWLLM_INGRESS_ADDR")
-        .unwrap_or_else(|_| "0.0.0.0:8443".to_string());
+    // R10: ingress listener is driven by config, not env; disabled by default flag.
+    let ingress_cfg = config.ingress.clone();
     let certs_dir = std::env::var("FWLLM_CERTS_DIR").unwrap_or_else(|_| "./certs".to_string());
 
-    let app = fwllm_gateway::build_app(config, None);
-    let ingress_app = app.clone();
+    let (app, state) = fwllm_gateway::build_app_full(config, None, None);
 
-    // Spawn ingress TLS listener on :8443
-    let certs_dir_clone = certs_dir.clone();
-    tokio::spawn(async move {
-        match ensure_self_signed_certs(Path::new(&certs_dir_clone)) {
-            Ok((cert_path, key_path)) => {
-                let tls_config =
-                    match axum_server::tls_rustls::RustlsConfig::from_pem_file(cert_path, key_path)
-                        .await
-                    {
-                        Ok(c) => c,
-                        Err(e) => {
-                            tracing::warn!("ingress TLS config failed: {e}");
-                            return;
-                        }
-                    };
-                tracing::info!("fwllm ingress TLS listening on {ingress_addr}");
-                if let Err(e) = axum_server::bind_rustls(
-                    ingress_addr.parse().unwrap(),
-                    tls_config,
-                )
+    if ingress_cfg.enabled {
+        // Fail fast: a mandatory listener that cannot start must fail startup,
+        // so readiness reflects the error instead of silently serving half (R10).
+        let (cert_path, key_path) =
+            ensure_self_signed_certs(Path::new(&certs_dir), &ingress_cfg.sans)
+                .unwrap_or_else(|e| {
+                    eprintln!("ingress cert setup failed: {e}");
+                    std::process::exit(1);
+                });
+        let tls_config =
+            axum_server::tls_rustls::RustlsConfig::from_pem_file(cert_path, key_path)
+                .await
+                .unwrap_or_else(|e| {
+                    eprintln!("ingress TLS config failed: {e}");
+                    std::process::exit(1);
+                });
+        let ingress_addr: std::net::SocketAddr = ingress_cfg.listen.parse().unwrap_or_else(|e| {
+            eprintln!("invalid ingress.listen '{}': {e}", ingress_cfg.listen);
+            std::process::exit(1);
+        });
+        // R10: agent port serves ONLY /ingress — no chat/admin/metrics here.
+        let ingress_app = fwllm_gateway::build_ingress_router(state);
+        tracing::info!("fwllm ingress TLS listening on {ingress_addr}");
+        tokio::spawn(async move {
+            if let Err(e) = axum_server::bind_rustls(ingress_addr, tls_config)
                 .serve(ingress_app.into_make_service())
                 .await
-                {
-                    tracing::warn!("ingress server error: {e}");
-                }
+            {
+                eprintln!("ingress server error: {e}");
+                std::process::exit(1);
             }
-            Err(e) => tracing::warn!("failed to ensure certs: {e}"),
-        }
-    });
+        });
+    } else {
+        tracing::info!("ingress listener disabled by config");
+    }
 
     let listener = tokio::net::TcpListener::bind(&addr).await.expect("bind");
-    tracing::info!("fwllm-gateway {addr} listening (ingress wss on :8443)");
+    tracing::info!("fwllm-gateway {addr} listening");
     axum::serve(listener, app).await.expect("server");
 }

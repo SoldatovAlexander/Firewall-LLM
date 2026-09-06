@@ -155,3 +155,44 @@ routing:
     assert_eq!(af.count, 5);
     assert_eq!(af.switch_to.as_deref(), Some("backup"));
 }
+
+#[test]
+fn ingress_defaults_to_enabled_8443() {
+    let _env = ENV_LOCK.lock().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let key_var = "TEST_KEY_INGRESS_DEFAULT";
+    std::env::set_var(key_var, "sk-1");
+    let cfg = load_config(&write_cfg(dir.path(), &minimal_cfg(key_var))).unwrap();
+    assert!(cfg.ingress.enabled);
+    assert_eq!(cfg.ingress.listen, "0.0.0.0:8443");
+}
+
+#[test]
+fn ingress_custom_listen_parses() {
+    let _env = ENV_LOCK.lock().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let key_var = "TEST_KEY_INGRESS_CUSTOM";
+    std::env::set_var(key_var, "sk-1");
+    let src = format!(
+        "{}\ningress:\n  enabled: false\n  listen: 127.0.0.1:9443\n",
+        minimal_cfg(key_var)
+    );
+    let cfg = load_config(&write_cfg(dir.path(), &src)).unwrap();
+    assert!(!cfg.ingress.enabled);
+    assert_eq!(cfg.ingress.listen, "127.0.0.1:9443");
+}
+
+#[test]
+fn ingress_invalid_listen_rejected() {
+    let _env = ENV_LOCK.lock().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let key_var = "TEST_KEY_INGRESS_BAD";
+    std::env::set_var(key_var, "sk-1");
+    let src = format!(
+        "{}\ningress:\n  listen: not-an-addr\n",
+        minimal_cfg(key_var)
+    );
+    let err = load_config(&write_cfg(dir.path(), &src)).unwrap_err();
+    let msg = err.to_string();
+    assert!(msg.contains("listen"), "{msg}");
+}

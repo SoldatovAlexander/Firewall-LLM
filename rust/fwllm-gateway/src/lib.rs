@@ -41,6 +41,16 @@ pub fn build_app_with_metering(
     providers: Option<Arc<providers::ProviderRegistry>>,
     metering: Option<metering::Metering>,
 ) -> Router {
+    build_app_full(config, providers, metering).0
+}
+
+/// Build main router plus the shared state, so embeddings (e.g. a separate
+/// ingress listener) can serve additional routers from the same AppState.
+pub fn build_app_full(
+    config: Config,
+    providers: Option<Arc<providers::ProviderRegistry>>,
+    metering: Option<metering::Metering>,
+) -> (Router, Arc<AppState>) {
     let audit = match audit::AuditLog::open(&config.audit) {
         Ok(log) => Some(Arc::new(log)),
         Err(e) => {
@@ -49,7 +59,7 @@ pub fn build_app_with_metering(
         }
     };
     let state = AppState::build(config, providers, metering, audit);
-    Router::new()
+    let router = Router::new()
         .route("/healthz", get(healthz))
         .route("/v1/chat/completions", post(chat_completions))
         .route("/admin/audit", get(admin_audit))
@@ -57,6 +67,15 @@ pub fn build_app_with_metering(
         .route("/admin/ingress/agents", get(list_ingress_agents))
         .route("/ingress", get(ingress_ws_handler))
         .route("/metrics", get(metrics_handler))
+        .with_state(state.clone());
+    (router, state)
+}
+
+/// Agent-facing router for the :8443 listener: only `/ingress` exists here.
+/// Chat, admin and metrics routes intentionally return 404 on this port (R10).
+pub fn build_ingress_router(state: Arc<AppState>) -> Router {
+    Router::new()
+        .route("/ingress", get(ingress_ws_handler))
         .with_state(state)
 }
 

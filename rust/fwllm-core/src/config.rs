@@ -341,6 +341,34 @@ pub struct InspectorsConfig {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct IngressConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_ingress_listen")]
+    pub listen: String,
+    #[serde(default = "default_ingress_sans")]
+    pub sans: Vec<String>,
+}
+
+impl Default for IngressConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            listen: default_ingress_listen(),
+            sans: default_ingress_sans(),
+        }
+    }
+}
+
+fn default_ingress_listen() -> String {
+    "0.0.0.0:8443".to_string()
+}
+
+fn default_ingress_sans() -> Vec<String> {
+    vec!["localhost".to_string(), "fwllm-gateway".to_string()]
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AuditConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
@@ -385,6 +413,8 @@ pub struct Config {
     pub inspectors: InspectorsConfig,
     #[serde(default)]
     pub audit: AuditConfig,
+    #[serde(default)]
+    pub ingress: IngressConfig,
 }
 
 /// Load and validate configuration from a YAML file.
@@ -472,6 +502,16 @@ pub fn load_config_from_str(raw: &str) -> Result<Config, ConfigError> {
     }
 
     let mut cfg: Config = serde_yaml::from_value(value)?;
+
+    // R10: reject unusable ingress listen addresses at load time
+    if cfg.ingress.enabled {
+        cfg.ingress.listen.parse::<std::net::SocketAddr>().map_err(|_| {
+            ConfigError::Validation(format!(
+                "invalid ingress.listen address '{}'",
+                cfg.ingress.listen
+            ))
+        })?;
+    }
 
     // resolve api keys from environment
     for (name, provider) in cfg.providers.iter_mut() {

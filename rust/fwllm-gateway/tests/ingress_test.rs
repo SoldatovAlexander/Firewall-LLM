@@ -115,6 +115,66 @@ async fn empty_admin_list_client_cannot_issue_ingress_token() {
     assert_eq!(res.status(), 403);
 }
 
+fn ingress_test_state() -> std::sync::Arc<fwllm_gateway::state::AppState> {
+    use fwllm_gateway::providers::{Provider, ProviderError};
+    use std::collections::HashMap;
+    use std::pin::Pin;
+    use std::sync::Arc;
+    use std::future::Future;
+
+    struct Noop;
+    impl Provider for Noop {
+        fn chat(&self, _p: Value) -> Pin<Box<dyn Future<Output = Result<Value, ProviderError>> + Send>> {
+            Box::pin(async { Ok(json!({})) })
+        }
+    }
+    let cfg = fwllm_core::config::load_config_from_str(r#"
+providers:
+  p:
+    type: openai_compat
+    base_url: https://p.example/v1
+clients:
+  alice-key: alice
+"#).unwrap();
+    let mut m = HashMap::new();
+    m.insert("p".into(), Arc::new(Noop) as Arc<dyn Provider>);
+    fwllm_gateway::state::AppState::build(cfg, Some(Arc::new(m)), None, None)
+}
+
+#[tokio::test]
+async fn ingress_router_serves_only_ingress() {
+    let router = fwllm_gateway::build_ingress_router(ingress_test_state());
+    // chat must not exist on the agent port
+    let res = router.clone().oneshot(
+        axum::http::Request::builder().method("POST").uri("/v1/chat/completions")
+            .header("content-type", "application/json")
+            .header("authorization", "Bearer alice-key")
+            .body(Body::from(json!({"model":"m","messages":[]}).to_string())).unwrap()
+    ).await.unwrap();
+    assert_eq!(res.status(), 404);
+    // admin must not exist on the agent port
+    let res = router.clone().oneshot(
+        axum::http::Request::builder().uri("/admin/audit")
+            .header("authorization", "Bearer alice-key")
+            .body(Body::empty()).unwrap()
+    ).await.unwrap();
+    assert_eq!(res.status(), 404);
+    // metrics must not exist on the agent port
+    let res = router.clone().oneshot(
+        axum::http::Request::builder().uri("/metrics")
+            .header("authorization", "Bearer alice-key")
+            .body(Body::empty()).unwrap()
+    ).await.unwrap();
+    assert_eq!(res.status(), 404);
+    // /ingress itself exists: bad token -> 401, not 404
+    let res = router.oneshot(
+        axum::http::Request::builder().uri("/ingress")
+            .header("authorization", "Bearer bad-token-xyz")
+            .body(Body::empty()).unwrap()
+    ).await.unwrap();
+    assert_eq!(res.status(), 401);
+}
+
 #[tokio::test]
 async fn with_admin_list_admin_can_issue_client_cannot() {
     let app = app_with_admin_clients("admin_clients:\n  admin-key-1: admin\n");
