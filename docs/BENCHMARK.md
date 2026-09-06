@@ -1,5 +1,7 @@
 # Benchmark: Python vs Rust Gateway (dev-server 192.168.88.101)
 
+> **Архивный замер (релиз 0.1.0):** цифры ниже от 2026-08-26 — до цикла R01–R16. Учёт токенов/квот с тех пор изменился (R03 always-count + estimate, R05 атомарный admit/settle с резервом), поэтому абсолютные значения RPS/памяти нельзя переносить на релиз 1:1. Перегон запланирован на dev-server после обновления стенда.
+
 **Date:** 2026-08-26 · **Tool:** `scripts/bench.py` (httpx, asyncio, 50 rps, 10s, 3 runs) · **Provider:** mock-llm (http://mock-llm:8000, instant 200)
 
 ## Healthz (no provider, pure gateway)
