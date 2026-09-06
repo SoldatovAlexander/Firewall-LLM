@@ -16,6 +16,10 @@ fn auth_header() -> (&'static str, String) {
     ("authorization", format!("Bearer {CLIENT_KEY}"))
 }
 
+fn admin_header() -> (&'static str, String) {
+    ("authorization", "Bearer admin-key-1".to_string())
+}
+
 use futures_util::Stream;
 use fwllm_gateway::providers::StreamFuture;
 
@@ -56,6 +60,8 @@ providers:
     base_url: https://b.example/v1
 clients:
   {CLIENT_KEY}: alice
+admin_clients:
+  admin-key-1: admin
 {}
 "#,
         routing.map(|r| serde_yaml::to_string(&r).unwrap()).unwrap_or_default()
@@ -96,7 +102,7 @@ async fn metrics_endpoint_renders() {
         .oneshot(
             axum::http::Request::builder()
                 .uri("/metrics")
-                .header("authorization", auth_header().1)
+                .header("authorization", admin_header().1)
                 .body(Body::empty())
                 .unwrap(),
         )

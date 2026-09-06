@@ -15,6 +15,10 @@ const CLIENT_KEY: &str = "secret-client-key";
 fn auth() -> String { format!("Bearer {CLIENT_KEY}") }
 
 fn app() -> axum::Router {
+    app_with_admin_clients("")
+}
+
+fn app_with_admin_clients(admin_clients_yaml: &str) -> axum::Router {
     let cfg = fwllm_core::config::load_config_from_str(&format!(r#"
 providers:
   p:
@@ -22,7 +26,7 @@ providers:
     base_url: https://p.example/v1
 clients:
   {CLIENT_KEY}: alice
-"#)).unwrap();
+{admin_clients_yaml}"#)).unwrap();
     struct Noop;
     impl Provider for Noop {
         fn chat(&self, _p: Value) -> Pin<Box<dyn Future<Output = Result<Value, ProviderError>> + Send>> {
@@ -51,10 +55,11 @@ async fn create_token_requires_auth() {
 
 #[tokio::test]
 async fn create_token_returns_token() {
-    let res = app().oneshot(
+    let app = app_with_admin_clients("admin_clients:\n  admin-key-1: admin\n");
+    let res = app.oneshot(
         axum::http::Request::builder().method("POST").uri("/admin/ingress/tokens")
             .header("content-type","application/json")
-            .header("authorization", auth())
+            .header("authorization", admin_auth())
             .body(Body::from(json!({"agent_id":"agent-1"}).to_string())).unwrap()
     ).await.unwrap();
     assert_eq!(res.status(), 200);
@@ -65,9 +70,10 @@ async fn create_token_returns_token() {
 
 #[tokio::test]
 async fn list_agents_initially_empty() {
-    let res = app().oneshot(
+    let app = app_with_admin_clients("admin_clients:\n  admin-key-1: admin\n");
+    let res = app.oneshot(
         axum::http::Request::builder().uri("/admin/ingress/agents")
-            .header("authorization", auth())
+            .header("authorization", admin_auth())
             .body(Body::empty()).unwrap()
     ).await.unwrap();
     assert_eq!(res.status(), 200);
@@ -88,4 +94,35 @@ async fn ws_handshake_requires_valid_token() {
             .body(Body::empty()).unwrap()
     ).await.unwrap();
     assert_eq!(res.status(), 401);
+}
+
+const ADMIN_KEY: &str = "admin-key-1";
+
+fn admin_auth() -> String {
+    format!("Bearer {ADMIN_KEY}")
+}
+
+fn token_request(auth: String) -> axum::http::Request<Body> {
+    axum::http::Request::builder().method("POST").uri("/admin/ingress/tokens")
+        .header("content-type","application/json")
+        .header("authorization", auth)
+        .body(Body::from(json!({"agent_id":"agent-1"}).to_string())).unwrap()
+}
+
+#[tokio::test]
+async fn empty_admin_list_client_cannot_issue_ingress_token() {
+    let res = app().oneshot(token_request(auth())).await.unwrap();
+    assert_eq!(res.status(), 403);
+}
+
+#[tokio::test]
+async fn with_admin_list_admin_can_issue_client_cannot() {
+    let app = app_with_admin_clients("admin_clients:\n  admin-key-1: admin\n");
+    let res = app.clone().oneshot(token_request(admin_auth())).await.unwrap();
+    assert_eq!(res.status(), 200);
+    let body = body_json(res).await;
+    assert_eq!(body["agent_id"], "agent-1");
+
+    let res = app.oneshot(token_request(auth())).await.unwrap();
+    assert_eq!(res.status(), 403);
 }

@@ -98,8 +98,10 @@ def test_healthz():
 
 
 def test_metrics_exposed():
-    with _client(FakeProvider()) as c:
-        assert c.get("/metrics", headers=_headers()).status_code == 200
+    cfg = _config(admin_clients={"admin-key": "admin"})
+    with _client(FakeProvider(), cfg) as c:
+        assert c.get("/metrics", headers=_headers("admin-key")).status_code == 200
+        assert c.get("/metrics", headers=_headers()).status_code == 403
 
 
 # --- authentication ---------------------------------------------------------

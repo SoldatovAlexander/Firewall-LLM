@@ -93,22 +93,17 @@ async def _require_admin(request: Request) -> str:
     token = auth.removeprefix("Bearer ").strip()
     if not token:
         raise auth_error("invalid API key", code="invalid_api_key")
-    if admin_clients:
-        if token in admin_clients:
-            return admin_clients[token]
+    if token in admin_clients:
+        return admin_clients[token]
+    # No fallback: an empty admin list means admin endpoints are disabled.
+    # Self-audit stays available via _require_client with mandatory ID filter.
+    if token in clients:
         raise ApiError(
             status=403,
             type_="permission_error",
             message="admin privileges required",
             code="admin_required",
         )
-    # Fallback: if no admin tokens configured, allow any valid client but warn (insecure)
-    if token in clients:
-        logger.warning(
-            "admin endpoint accessed with client token; "
-            "configure admin_clients for proper isolation"
-        )
-        return clients[token]
     raise auth_error("invalid API key", code="invalid_api_key")
 
 
@@ -132,6 +127,11 @@ def create_app(
     app.state.config = config
     app.state.clients = config.clients
     app.state.admin_clients = config.admin_clients
+    if not config.admin_clients:
+        logger.warning(
+            "no admin_clients configured: /admin/* endpoints are disabled, "
+            "clients can only self-audit; set admin_clients or FWLLM_ADMIN_TOKENS"
+        )
     if providers is None:
         from fwllm.providers.registry import build_providers
 

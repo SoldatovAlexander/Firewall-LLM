@@ -400,11 +400,12 @@ async fn require_admin(
     if token.is_empty() {
         return Err(ApiError::auth("missing bearer token", "missing_api_key"));
     }
-    // Prefer dedicated admin tokens; fall back to clients only if no admin tokens configured (with warning)
-    if !state.admin_clients.is_empty() {
-        if let Some(label) = state.admin_clients.get(token) {
-            return Ok(label.clone());
-        }
+    // No fallback: an empty admin list means admin endpoints are disabled.
+    // Self-audit stays available via require_client with mandatory ID filter.
+    if let Some(label) = state.admin_clients.get(token) {
+        return Ok(label.clone());
+    }
+    if state.clients.contains_key(token) {
         return Err(ApiError {
             status: axum::http::StatusCode::FORBIDDEN,
             kind: "permission_error",
@@ -412,11 +413,6 @@ async fn require_admin(
             code: Some("admin_required"),
             details: None,
         });
-    }
-    // Fallback: if no admin tokens configured, treat any valid client as admin but log warning
-    if state.clients.contains_key(token) {
-        tracing::warn!("admin endpoint accessed with client token; configure admin_clients for proper isolation");
-        return Ok(state.clients.get(token).cloned().unwrap_or_default());
     }
     Err(ApiError::auth("invalid API key", "invalid_api_key"))
 }

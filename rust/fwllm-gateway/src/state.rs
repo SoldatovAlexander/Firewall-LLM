@@ -124,6 +124,13 @@ impl AppState {
         }
         let inspectors = std::sync::Arc::new(inspectors_chain);
 
+        if config.admin_clients.is_empty() {
+            tracing::warn!(
+                "no admin_clients configured: /admin/* endpoints are disabled, \
+                 clients can only self-audit; set admin_clients or FWLLM_ADMIN_TOKENS"
+            );
+        }
+
         let metering = metering_override.or_else(|| {
             crate::metering::RedisStore::new(&config.redis_url).ok().map(|store| {
                 crate::metering::Metering::new(Box::new(store), &config.quotas)
