@@ -16,6 +16,17 @@ Prod-like config: DLP `mask/restore` `ru_152`, injection `block` (+ML XLM-R on P
 
 Codes at every load: all `200` (Python included) — degradation is latency-only, no errors. Reading: on this hardware Python chat saturates between 5 and 20 rps (ONNX inference without AVX2 dominates); Rust stays flat to at least 50 rps. Capacity planning must use these numbers, not the 2026-08-26 table (DLP-off, ML-off, pre-R03/R05 accounting).
 
+## 0.1.1 capacity re-measure (2026-09-06, same host, 4 workers + WAL)
+
+| Load | Python chat p50/p95 | Rust chat p50/p95 |
+|---|---|---|
+| 20 rps × 10 s | 16 / 20 ms (was 789 / 1371) | 11 / 13 ms |
+| 50 rps × 10 s | 16 / 18 ms (was ~2324 / ~2570) | 11 / 13 ms |
+| 100 rps × 10 s | 16 / 19 ms | 10 / 13 ms |
+| 200 rps × 10 s | 14 / 19 ms (client-limited ~183 rps served) | 10 / 14 ms |
+
+All `200`, no 429s (128 inflight slots never filled). Previous knee (queue collapse at ~16rps single-worker) is gone; serving capacity on this 2011 hardware now exceeds what a single bench client generates.
+
 Hardware constraints affecting the release image: the `gateway-rust` image requires trixie glibc (ort prebuilts need ≥ 2.38) + libstdc++/libgomp at runtime (see Dockerfile); ort prebuilts additionally require AVX2 — hosts without it must set `injection.ml.enabled: false` on the Rust gateway (fail-fast aborts startup otherwise).
 
 ## Healthz (no provider, pure gateway)
