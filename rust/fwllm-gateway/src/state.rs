@@ -140,10 +140,18 @@ impl AppState {
             );
         }
 
+        // R11: a malformed redis_url is a configuration error and must fail
+        // fast — never silently degrade to metering=None. An unreachable
+        // server at a well-formed URL is handled per-request (503 fail-closed
+        // or fail-open skip).
         let metering = metering_override.or_else(|| {
-            crate::metering::RedisStore::new(&config.redis_url).ok().map(|store| {
-                crate::metering::Metering::new(Box::new(store), &config.quotas)
-            })
+            match crate::metering::RedisStore::new(&config.redis_url) {
+                Ok(store) => Some(crate::metering::Metering::new(
+                    Box::new(store),
+                    &config.quotas,
+                )),
+                Err(e) => panic!("invalid redis_url '{}': {e}", config.redis_url),
+            }
         });
 
         Arc::new(Self {

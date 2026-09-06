@@ -24,6 +24,7 @@ pub struct QuotaExceeded {
 pub trait MeteringStore: Send + Sync {
     fn incr(&self, key: &str, amount: i64) -> Result<i64, String>;
     fn get(&self, key: &str) -> Result<i64, String>;
+    fn ping(&self) -> Result<(), String>;
 }
 
 pub struct InMemoryStore {
@@ -46,6 +47,9 @@ impl MeteringStore for InMemoryStore {
     fn get(&self, key: &str) -> Result<i64, String> {
         Ok(self.counters.lock().unwrap().get(key).copied().unwrap_or(0))
     }
+    fn ping(&self) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 pub struct RedisStore {
@@ -66,6 +70,13 @@ impl MeteringStore for RedisStore {
     fn get(&self, key: &str) -> Result<i64, String> {
         let mut conn = self.client.get_connection().map_err(|e| e.to_string())?;
         conn.get(key).map_err(|e| e.to_string())
+    }
+    fn ping(&self) -> Result<(), String> {
+        let mut conn = self.client.get_connection().map_err(|e| e.to_string())?;
+        redis::cmd("PING")
+            .query::<String>(&mut conn)
+            .map_err(|e| e.to_string())?;
+        Ok(())
     }
 }
 
@@ -97,8 +108,20 @@ impl Metering {
         day_string(now_ts())
     }
 
+    /// R11: in fail-closed mode the backend is verified on every check,
+    /// even when no numeric quotas are set — same semantics as Python.
+    fn ensure_ready(&self) -> Result<(), MeteringError> {
+        if self.backend_fail_closed {
+            self.store
+                .ping()
+                .map_err(MeteringError::BackendUnavailable)?;
+        }
+        Ok(())
+    }
+
     /// Check daily quotas. Err(QuotaExceeded) -> 429; Err(BackendUnavailable) when fail-closed -> 503.
     pub fn check_client(&self, client_id: &str) -> Result<(), MeteringError> {
+        self.ensure_ready()?;
         let day = self.day();
         if let Some(limit) = self.client_tokens_per_day {
             let used = match self.store.get(&format!("fwllm:c:tokens:{client_id}:{day}")) {
@@ -132,6 +155,7 @@ impl Metering {
     }
 
     pub fn check_provider(&self, provider: &str) -> Result<(), MeteringError> {
+        self.ensure_ready()?;
         if let Some(limit) = self.provider_tokens_per_day {
             let day = self.day();
             let used = match self.store.get(&format!("fwllm:p:tokens:{provider}:{day}")) {

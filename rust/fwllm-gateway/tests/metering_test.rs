@@ -42,6 +42,73 @@ fn request_quota_exceeded() {
     assert!(matches!(m.check_client("bob").unwrap_err(), MeteringError::QuotaExceeded { scope: "requests", .. }));
 }
 
+struct BrokenStore;
+
+impl fwllm_gateway::metering::MeteringStore for BrokenStore {
+    fn incr(&self, _key: &str, _amount: i64) -> Result<i64, String> {
+        Err("down".to_string())
+    }
+    fn get(&self, _key: &str) -> Result<i64, String> {
+        Err("down".to_string())
+    }
+    fn ping(&self) -> Result<(), String> {
+        Err("down".to_string())
+    }
+}
+
+#[test]
+fn fail_closed_checks_backend_even_without_quotas() {
+    let quotas = Quotas {
+        backend_fail_closed: true,
+        ..Default::default()
+    };
+    let m = Metering::new(Box::new(BrokenStore), &quotas);
+    assert!(matches!(
+        m.check_client("alice"),
+        Err(MeteringError::BackendUnavailable(_))
+    ));
+}
+
+#[test]
+fn fail_open_ignores_backend_without_quotas() {
+    let quotas = Quotas {
+        backend_fail_closed: false,
+        ..Default::default()
+    };
+    let m = Metering::new(Box::new(BrokenStore), &quotas);
+    assert!(m.check_client("alice").is_ok());
+}
+
+#[test]
+#[should_panic(expected = "invalid redis_url")]
+fn malformed_redis_url_fails_fast() {
+    use fwllm_gateway::providers::{OpenAiCompatProvider, Provider};
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    let mut cfg: fwllm_core::config::Config = serde_yaml::from_str(
+        "providers:\n  p:\n    base_url: http://unused.invalid/v1\nredis_url: 'redis://localhost:6379/0'\n",
+    )
+    .unwrap();
+    cfg.redis_url = "http://[invalid".to_string();
+    let mut providers = HashMap::new();
+    providers.insert(
+        "p".to_string(),
+        Arc::new(OpenAiCompatProvider::new(
+            "http://unused.invalid/v1",
+            None,
+            std::time::Duration::from_secs(1),
+            vec![],
+        )) as Arc<dyn Provider>,
+    );
+    let _ = fwllm_gateway::state::AppState::build(
+        cfg,
+        Some(Arc::new(providers)),
+        None,
+        None,
+    );
+}
+
 #[test]
 fn no_quotas_never_exceeds() {
     let m = Metering::new(Box::new(InMemoryStore::default()), &Quotas::default());

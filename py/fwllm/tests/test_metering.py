@@ -47,6 +47,31 @@ async def test_requests_counted_per_call(redis: Any) -> None:
     assert await redis.get("fwllm:c:req:bob:20260825") == "3"
 
 
+class BrokenRedis:
+    async def ping(self):
+        raise ConnectionError("down")
+
+    async def get(self, key):
+        raise ConnectionError("down")
+
+    async def incrby(self, key, amount):
+        raise ConnectionError("down")
+
+    async def expire(self, key, ttl):
+        raise ConnectionError("down")
+
+
+async def test_fail_closed_checks_backend_even_without_quotas() -> None:
+    m = Metering(BrokenRedis(), quotas={}, backend_fail_closed=True, clock=_clock(25))
+    with pytest.raises(Exception, match="down"):
+        await m.check_client("alice")
+
+
+async def test_fail_open_ignores_backend_without_quotas() -> None:
+    m = Metering(BrokenRedis(), quotas={}, backend_fail_closed=False, clock=_clock(25))
+    await m.check_client("alice")
+
+
 async def test_token_quota_exceeded_raises(redis: Any) -> None:
     quotas = {"client_tokens_per_day": 10}
     m = Metering(redis, quotas=quotas, clock=_clock(25))
