@@ -411,6 +411,9 @@ pub struct Config {
     pub clients: BTreeMap<String, String>,
     #[serde(default)]
     pub admin_clients: BTreeMap<String, String>,
+    /// R15: least-privilege scrape tokens accepted only on /metrics.
+    #[serde(default)]
+    pub metrics_tokens: BTreeMap<String, String>,
     #[serde(default)]
     pub quotas: Quotas,
     #[serde(default)]
@@ -505,6 +508,30 @@ pub fn load_config_from_str(raw: &str) -> Result<Config, ConfigError> {
             mm.insert(
                 serde_yaml::Value::from("admin_clients"),
                 serde_yaml::Value::Mapping(admin_clients),
+            );
+        }
+    }
+    // R15: FWLLM_METRICS_TOKENS uses the same "token:label,..." format.
+    if let Ok(tokens) = std::env::var("FWLLM_METRICS_TOKENS") {
+        let mut metrics_tokens = serde_yaml::Mapping::new();
+        for pair in tokens.split(',') {
+            let pair = pair.trim();
+            if pair.is_empty() {
+                continue;
+            }
+            let (token, label) = match pair.split_once(':') {
+                Some((t, l)) => (t, l),
+                None => (pair, ""),
+            };
+            metrics_tokens.insert(
+                serde_yaml::Value::from(token),
+                serde_yaml::Value::from(if label.is_empty() { token } else { label }),
+            );
+        }
+        if let Some(mm) = value.as_mapping_mut() {
+            mm.insert(
+                serde_yaml::Value::from("metrics_tokens"),
+                serde_yaml::Value::Mapping(metrics_tokens),
             );
         }
     }

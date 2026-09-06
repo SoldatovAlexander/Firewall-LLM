@@ -136,6 +136,21 @@ async def _require_admin(request: Request) -> str:
     raise auth_error("invalid API key", code="invalid_api_key")
 
 
+async def _require_metrics(request: Request) -> str:
+    """R15: /metrics accepts admin tokens or least-privilege metrics tokens.
+
+    Unknown/missing tokens stay 401; ordinary client tokens stay 403, so
+    monitoring never needs a full admin token and clients cannot scrape.
+    """
+    metrics_tokens: dict[str, str] = getattr(request.app.state, "metrics_tokens", {})
+    auth = request.headers.get("Authorization", "")
+    if auth.startswith("Bearer "):
+        token = auth.removeprefix("Bearer ").strip()
+        if token and token in metrics_tokens:
+            return metrics_tokens[token]
+    return await _require_admin(request)
+
+
 def _build_redis_store(url: str) -> Any:
     import redis as redis_sync
 
@@ -156,6 +171,7 @@ def create_app(
     app.state.config = config
     app.state.clients = config.clients
     app.state.admin_clients = config.admin_clients
+    app.state.metrics_tokens = config.metrics_tokens
     if not config.admin_clients:
         logger.warning(
             "no admin_clients configured: /admin/* endpoints are disabled, "
@@ -559,7 +575,7 @@ def create_app(
     @app.get("/metrics")
     async def metrics(request: Request) -> FastAPIResponse:
         try:
-            await _require_admin(request)
+            await _require_metrics(request)
         except ApiError as exc:
             return exc.response()
         return FastAPIResponse(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)

@@ -36,6 +36,42 @@ def test_gateway_request_updates_fw_metrics():
         assert tokens is not None and tokens >= 3
 
 
+METRICS_TOKEN = "metrics-scrape-key"  # noqa: S105 - test fixture value
+
+
+def _metrics_app() -> TestClient:
+    cfg = Config(
+        providers={"mock": ProviderConfig(base_url="http://mock.local/v1")},
+        clients={CLIENT_KEY: "alice"},
+        admin_clients={"admin-key-1": "admin"},
+        metrics_tokens={METRICS_TOKEN: "prometheus"},
+    )
+    return TestClient(create_app(cfg, providers={"mock": FakeProvider()}))
+
+
+def test_metrics_scoped_token_scrapes_without_admin():
+    """R15: monitoring uses a least-privilege metrics token, not admin."""
+    with _metrics_app() as c:
+        r = c.get("/metrics", headers={"Authorization": f"Bearer {METRICS_TOKEN}"})
+        assert r.status_code == 200
+        assert "fw_requests_total" in r.text
+
+
+def test_metrics_unknown_or_missing_token_is_401():
+    with _metrics_app() as c:
+        assert c.get("/metrics").status_code == 401
+        assert (
+            c.get("/metrics", headers={"Authorization": "Bearer nope"}).status_code
+            == 401
+        )
+
+
+def test_metrics_client_token_stays_forbidden():
+    """R15: ordinary client tokens must not scrape metrics."""
+    with _metrics_app() as c:
+        assert c.get("/metrics", headers=_headers()).status_code == 403
+
+
 def test_gateway_upstream_error_metric_code():
     cfg = Config(
         providers={"mock": ProviderConfig(base_url="http://mock.local/v1")},

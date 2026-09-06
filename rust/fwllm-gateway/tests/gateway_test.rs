@@ -770,6 +770,54 @@ async fn stream_payload_asks_for_include_usage() {
     assert_eq!(sent["stream_options"]["include_usage"], true);
 }
 
+fn metrics_tokens_app() -> axum::Router {
+    let extra: serde_yaml::Value = serde_yaml::from_str(
+        "metrics_tokens:\n  metrics-key-1: prometheus\n",
+    )
+    .unwrap();
+    fwllm_gateway::build_app(base_config(Some(extra)), None)
+}
+
+#[tokio::test]
+async fn metrics_scoped_token_scrapes_without_admin() {
+    let res = metrics_tokens_app()
+        .oneshot(
+            axum::http::Request::builder()
+                .uri("/metrics")
+                .header("authorization", "Bearer metrics-key-1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 200);
+}
+
+#[tokio::test]
+async fn metrics_unknown_token_is_401_and_client_is_403() {
+    let no_auth = metrics_tokens_app()
+        .oneshot(
+            axum::http::Request::builder()
+                .uri("/metrics")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(no_auth.status(), 401);
+    let res = metrics_tokens_app()
+        .oneshot(
+            axum::http::Request::builder()
+                .uri("/metrics")
+                .header(auth_header().0, auth_header().1)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 403);
+}
+
 #[tokio::test]
 async fn stream_open_failure_maps_to_502() {
     struct FailingStream;

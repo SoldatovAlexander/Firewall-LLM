@@ -179,6 +179,8 @@ class Config(BaseModel):
     # admin API tokens (separate from clients) -> label, for /admin/*.
     # If empty, fall back to clients with admin scope.
     admin_clients: dict[str, str] = Field(default_factory=dict)
+    # R15: least-privilege scrape tokens accepted only on /metrics.
+    metrics_tokens: dict[str, str] = Field(default_factory=dict)
     quotas: Quotas = Field(default_factory=Quotas)
     inspectors: InspectorsConfig = Field(default_factory=InspectorsConfig)
     egress: EgressConfig = Field(default_factory=EgressConfig)
@@ -242,6 +244,18 @@ def load_config(path: Path | str) -> Config:
             token, _, label = pair.partition(":")
             admin_clients[token] = label or token
         raw["admin_clients"] = admin_clients
+
+    # R15: FWLLM_METRICS_TOKENS uses the same "token:label,..." format.
+    env_metrics = os.environ.get("FWLLM_METRICS_TOKENS")
+    if env_metrics:
+        metrics_tokens: dict[str, str] = {}
+        for pair in env_metrics.split(","):
+            pair = pair.strip()
+            if not pair:
+                continue
+            token, _, label = pair.partition(":")
+            metrics_tokens[token] = label or token
+        raw["metrics_tokens"] = metrics_tokens
 
     try:
         cfg = Config.model_validate(raw)

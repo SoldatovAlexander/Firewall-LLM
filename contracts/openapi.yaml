@@ -56,6 +56,12 @@ paths:
   /metrics:
     get:
       summary: Prometheus metrics
+      description: >
+        Protected endpoint (R15). Accepts admin tokens or least-privilege
+        metrics tokens (FWLLM_METRICS_TOKENS, /metrics only); ordinary client
+        tokens are rejected. Prometheus scrapes it with bearer_token_file.
+      security:
+        - bearerAuth: []
       responses:
         "200":
           description: Metrics in Prometheus text format
@@ -63,6 +69,10 @@ paths:
             text/plain:
               schema:
                 type: string
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Blocked"
 components:
   securitySchemes:
     bearerAuth:

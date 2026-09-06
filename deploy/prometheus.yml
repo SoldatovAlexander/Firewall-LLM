@@ -6,7 +6,17 @@ scrape_configs:
     static_configs:
       - targets: ["localhost:9090"]
 
-  # fwllm gateway (deploy target; shows DOWN until gateway is up)
+  # R15: scrape via Compose service DNS (not a hardcoded LAN IP), both
+  # gateway branches. Auth uses a least-privilege metrics token read from a
+  # mounted credentials file — never stored in git. The token must match
+  # FWLLM_METRICS_TOKENS consumed by the gateways (see ../.env.example and
+  # ./secrets/README.md). Unauthenticated scrapes get 401.
   - job_name: fwllm-gateway
+    bearer_token_file: /etc/prometheus/fwllm_metrics_token
     static_configs:
-      - targets: ["192.168.88.101:8080"]
+      - targets: ["gateway:8080"]
+
+  - job_name: fwllm-gateway-rust
+    bearer_token_file: /etc/prometheus/fwllm_metrics_token
+    static_configs:
+      - targets: ["gateway-rust:8080"]

@@ -17,7 +17,11 @@ htmlcov/
 .env.*
 *.pem
 *.key
-secrets/
+# Contents of any secrets/ dir are ignored, but the directory itself is not
+# excluded so documented placeholders can be re-included below.
+**/secrets/*
+# ...except the documented placeholder for local scrape credentials
+!deploy/secrets/README.md
 vault.json
 
 # Configs with credentials

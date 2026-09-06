@@ -321,6 +321,20 @@ async fn metrics_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> Response {
+    // R15: /metrics accepts admin tokens or least-privilege metrics tokens.
+    // Unknown/missing tokens stay 401; ordinary client tokens stay 403.
+    if let Some(auth) = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+    {
+        let token = auth.trim();
+        if state.config.metrics_tokens.contains_key(token) {
+            let body = metrics::render_metrics();
+            return ([(axum::http::header::CONTENT_TYPE, "text/plain; version=0.0.4")], body)
+                .into_response();
+        }
+    }
     if let Err(err) = require_admin(&state, &headers).await {
         return err.into_response();
     }
