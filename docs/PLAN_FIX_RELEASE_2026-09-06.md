@@ -24,7 +24,7 @@
 | R10 listener :8443 | **новое** | `app.clone()` на :8443 отдаёт весь API; нет `IngressConfig` |
 | R12 Rust stream audit | **новое** | `stream_response` без `AuditLog` |
 | R15 prometheus/auth | **новое** | scrape на LAN IP без токена; Rust target отсутствует |
-| R16 Helm PVC | **новое** | `persistence.enabled` требует несуществующий PVC; `existingSecret` не подключён |
+| R16 Helm PVC | **новое** | `persistence.enabled` требует несуществующий PVC; `existingSecret` не подключён. Код чарта исправлен + статическая проверка (lint/template/kubeconform); живая установка ОТЛОЖЕНА — k8s вне релиза 0.1.0 |
 
 ## Этапы (порядок = зависимости, TDD, коммит после каждого)
 
@@ -35,7 +35,7 @@
 | 3. API и streaming | R04, R07, R13: `chunk["choices"] or []`, DTO по `openapi.yaml` (stop/metadata/tools инспектируются), stateful restore-decoder | 2–4д | общий корпус проходит на обеих ветках |
 | 4. Расходы и routing | R03, R05, R06: always-count + `include_usage` + estimate, Lua reserve/settle, `record_tokens` в путь, `RouterStateStore`/запрет `state_store=redis` в Rust до реализации | 3–5д | конкурентный тест 20→1, рестарт/реплика видят бюджеты |
 | 5. Туннель и аудит | R09, R12 + lifecycle: `IntoClientRequest` + Authorization, настоящий WSS exchange, audit-finalizer обеих веток | 2–4д | бинарники выполняют exchange; все terminal outcomes в аудите |
-| 6. Поставка и RC | R15, R16, `.env.example`, профили: service DNS + credentials file, PVC/existingSecret, smoke | 2–3д | Compose/Helm smoke, `up=1`, доки согласованы |
+| 6. Поставка и RC | R15, R16, `.env.example`, профили: service DNS + credentials file, PVC/existingSecret, smoke | 2–3д | Compose smoke, `up=1`, доки согласованы; Helm smoke — ОТЛОЖЕН (решение: k8s-поставка вне релиза 0.1.0, чарт проверен только статически) |
 
 Итого **12–22 инженерных дня**. P0 не назначен. P1 — до production-релиза компонента, P2 — до релиза возможности либо явное исключение из профиля поставки.
 

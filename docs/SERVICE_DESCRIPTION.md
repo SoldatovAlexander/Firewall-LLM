@@ -1,6 +1,6 @@
 # Firewall LLM — как работает сервис
 
-**Версия:** 0.1.0 · **Лицензия:** FSL-1.1-MIT (ядро) · **Развёртывание:** on-prem, Docker Compose / Helm
+**Версия:** 0.1.0 · **Лицензия:** FSL-1.1-MIT (ядро) · **Развёртывание:** on-prem, Docker Compose (Helm-чарт в репо есть, но k8s-поставка вне скоупа релиза 0.1.0 — см. §4; чарт проверен только статически: helm lint/template, kubeconform)
 
 ## 1. Что делает сервис
 
@@ -131,7 +131,7 @@ admin_clients:
   admin-secret-key: admin
 ```
 
-`.env.example` содержит все `OPENROUTER_API_KEY`, `FWLLM_CLIENT_TOKENS`, `FWLLM_ADMIN_TOKENS`, `GRAFANA_ADMIN_PASSWORD`.
+`.env.example` содержит все `OPENROUTER_API_KEY`, `FWLLM_CLIENT_TOKENS`, `FWLLM_ADMIN_TOKENS`, `FWLLM_METRICS_TOKENS`, `GRAFANA_ADMIN_PASSWORD` (плюс `./secrets/fwllm_metrics_token` — файл для Prometheus `bearer_token_file`, см. `deploy/secrets/README.md`).
 
 ## 4. Развёртывание
 
@@ -140,6 +140,9 @@ cd deploy
 cp fwllm.yaml.example fwllm.yaml
 cp .env.example .env   # заполнить ключи
 docker compose up -d --build   # gateway :8080, gateway-rust :8081, :8443 TLS, redis, prometheus, grafana
-# Helm
-helm install fwllm ./deploy/helm/fwllm --set secret.openRouterApiKey=...
+# Helm — ВНЕ СКОУПА релиза 0.1.0 (возможен позже при развитии):
+# helm install fwllm ./deploy/helm/fwllm --set secret.openRouterApiKey=... --set secret.clientTokens="..."
+# Чарт никогда не ставился на живой кластер; живой k8s-acceptance (установка,
+# запись аудита, пересоздание pod) — отложен. secret.clientTokens ОБЯЗАТЕЛЕН
+# (дефолта нет, R01); replicaCount > 1 запрещён de facto (SQLite, § persistence).
 ```

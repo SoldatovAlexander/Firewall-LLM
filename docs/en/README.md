@@ -9,6 +9,6 @@
 - [Audit](audit.md) — SQLite, redaction, `/admin/audit`
 - [Observability](observability.md) — Prometheus `/metrics`, Grafana import
 - [Ingress Tunnel](ingress.md) — `wss://:8443`, tokens, agent, masking
-- [Deployment](deployment.md) — Docker Compose, Helm, certs
+- [Deployment](deployment.md) — Docker Compose, certs (Helm out of release scope)
 
 - [Service Description (simple, non-technical)](../../docs/SERVICE_DESCRIPTION_SIMPLE.md) — how it works with examples

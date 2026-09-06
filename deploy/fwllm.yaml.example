@@ -1,11 +1,28 @@
 # Gateway configuration mounted into the container (see README deployment).
-# Secrets come from .env via api_key_env / FWLLM_CLIENT_TOKENS.
+# Secrets come from .env via api_key_env / FWLLM_CLIENT_TOKENS /
+# FWLLM_ADMIN_TOKENS / FWLLM_METRICS_TOKENS (same "token:label,..." format).
 
 server:
   host: 0.0.0.0
   port: 8080
 
 redis_url: redis://localhost:6379/0
+
+# clients / admin_clients / metrics_tokens come from the FWLLM_*_TOKENS env
+# vars above and are shown here only for reference:
+# clients:
+#   <client-token>: <label>
+# admin_clients:
+#   <admin-token>: <label>
+# metrics_tokens:   # /metrics ONLY, least privilege (R15)
+#   <metrics-token>: prometheus
+
+# quotas:
+#   client_tokens_per_day: 100000
+#   client_requests_per_day: 1000
+#   provider_tokens_per_day: 500000
+#   backend_fail_closed: false
+#   completion_reserve_tokens: 1024   # R05 reserve cap when no max_tokens
 
 providers:
   openrouter:

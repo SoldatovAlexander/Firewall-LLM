@@ -29,7 +29,10 @@ secret:
   # create via: kubectl create secret generic fwllm-secrets --from-literal=OPENROUTER_API_KEY=...
   create: true
   openRouterApiKey: ""
-  clientTokens: "test-client-key:alice"
+  # R01: NO default client tokens — a known test token must never ship as
+  # default. Set "token:label,..." explicitly; empty means no clients can
+  # authenticate (gateway denies with "no clients configured").
+  clientTokens: ""
 redis:
   enabled: true
   image: redis:7-alpine
