@@ -31,7 +31,7 @@ async fn tunnel_provider_forwards_and_returns_response() {
     let agent_id = "test-agent";
     let _entry = registry.issue_token(agent_id.to_string(), 1).await;
     // Register a real tunnel channel with a handler that returns a proper JSON
-    let (tx, mut rx) = mpsc::unbounded_channel();
+    let (tx, mut rx) = mpsc::channel(fwllm_gateway::ingress::TUNNEL_QUEUE_DEPTH);
     registry.register_tunnel(agent_id.to_string(), tx).await;
     tokio::spawn(async move {
         while let Some(req) = rx.recv().await {

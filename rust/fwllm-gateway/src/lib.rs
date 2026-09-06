@@ -267,11 +267,26 @@ async fn handle_ingress_socket(
 ) {
     use axum::extract::ws::Message;
     use tokio::sync::mpsc;
-    let (tx, mut rx) = mpsc::unbounded_channel();
+    // 0.1.1: bounded per-agent queue (see TUNNEL_QUEUE_DEPTH).
+    let (tx, mut rx) = mpsc::channel(crate::ingress::TUNNEL_QUEUE_DEPTH);
     registry.register_tunnel(agent_id.clone(), tx).await;
     let mut pending: std::collections::HashMap<String, tokio::sync::oneshot::Sender<crate::ingress::ProxyResponse>> = std::collections::HashMap::new();
+    // 0.1.1: heartbeat — silent agents are dropped and unregistered.
+    let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(
+        crate::ingress::HEARTBEAT_INTERVAL_SECS,
+    ));
+    heartbeat.tick().await; // first tick fires immediately; skip it
     loop {
         tokio::select! {
+            _ = heartbeat.tick() => {
+                if socket.send(Message::Ping(Vec::new())).await.is_err() {
+                    break;
+                }
+                // Sweep this agent if it stopped answering pongs.
+                if registry.is_stale(&agent_id, crate::ingress::HEARTBEAT_TIMEOUT_SECS as f64).await {
+                    break;
+                }
+            }
             msg = socket.recv() => {
                 match msg {
                     Some(Ok(Message::Text(text))) => {
@@ -290,6 +305,8 @@ async fn handle_ingress_socket(
                         }
                     }
                     Some(Ok(Message::Ping(d))) => { let _ = socket.send(Message::Pong(d)).await; }
+                    // 0.1.1: pong refreshes liveness for the heartbeat above.
+                    Some(Ok(Message::Pong(_))) => { registry.touch_agent(&agent_id).await; }
                     Some(Ok(Message::Close(_))) | None => break,
                     _ => {}
                 }
@@ -315,6 +332,11 @@ async fn handle_ingress_socket(
             }
         }
     }
+    // 0.1.1: disconnect cleanup — the agents list never keeps dead records,
+    // and the next forward fails fast with "no tunnel". Pending oneshots
+    // are dropped here, so in-flight forwards resolve as "agent dropped"
+    // instead of hanging to the 30s timeout.
+    registry.unregister_agent(&agent_id).await;
 }
 
 async fn metrics_handler(

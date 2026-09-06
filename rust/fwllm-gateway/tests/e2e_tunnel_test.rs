@@ -43,7 +43,7 @@ async fn e2e_tunnel_masks_headers() {
     let agent_id = "e2e-agent";
 
     // Create tunnel channel and spawn fake agent that forwards via reqwest with masking
-    let (tx, mut rx) = mpsc::unbounded_channel();
+    let (tx, mut rx) = mpsc::channel(fwllm_gateway::ingress::TUNNEL_QUEUE_DEPTH);
     registry.register_tunnel(agent_id.to_string(), tx).await;
 
     tokio::spawn({

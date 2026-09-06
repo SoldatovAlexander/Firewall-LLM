@@ -28,11 +28,20 @@ pub struct ProxyResponse {
     pub body: String,
 }
 
+/// 0.1.1 tunnel hardening: bounded per-agent queue — bursts beyond this
+/// fail fast with "agent overloaded" instead of growing memory without
+/// bound (previous: unbounded channel).
+pub const TUNNEL_QUEUE_DEPTH: usize = 16;
+/// Heartbeat: gateway pings every interval; an agent silent longer than
+/// the timeout is dropped and unregistered (stale-record cleanup).
+pub const HEARTBEAT_INTERVAL_SECS: u64 = 30;
+pub const HEARTBEAT_TIMEOUT_SECS: u64 = 90;
+
 #[derive(Default)]
 pub struct IngressRegistry {
     tokens: RwLock<HashMap<String, TokenEntry>>, // token -> entry
     agents: RwLock<HashMap<String, AgentConn>>,  // agent_id -> conn info
-    tunnels: RwLock<HashMap<String, mpsc::UnboundedSender<ProxyRequest>>>,
+    tunnels: RwLock<HashMap<String, mpsc::Sender<ProxyRequest>>>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -92,11 +101,55 @@ impl IngressRegistry {
     pub async fn register_tunnel(
         &self,
         agent_id: String,
-        sender: mpsc::UnboundedSender<ProxyRequest>,
+        sender: mpsc::Sender<ProxyRequest>,
     ) {
         self.tunnels.write().await.insert(agent_id.clone(), sender);
         self.register_agent(agent_id).await;
     }
+
+    /// 0.1.1: drop a dead agent's record AND its tunnel sender, so the
+    /// agents list never lies and the next forward fails fast with
+    /// "no tunnel" instead of hitting a dead channel.
+    pub async fn unregister_agent(&self, agent_id: &str) {
+        self.agents.write().await.remove(agent_id);
+        self.tunnels.write().await.remove(agent_id);
+    }
+
+    /// 0.1.1: heartbeat pong path — refreshes last_seen.
+    pub async fn touch_agent(&self, agent_id: &str) {
+        if let Some(conn) = self.agents.write().await.get_mut(agent_id) {
+            conn.last_seen = now_ts();
+        }
+    }
+
+    /// 0.1.1: heartbeat helper — true when the agent is missing or silent
+    /// longer than max_age.
+    pub async fn is_stale(&self, agent_id: &str, max_age_secs: f64) -> bool {
+        let now = now_ts();
+        match self.agents.read().await.get(agent_id) {
+            Some(conn) => now - conn.last_seen > max_age_secs,
+            None => true,
+        }
+    }
+
+    /// 0.1.1: sweep agents (and their tunnels) silent longer than max_age.
+    /// `now` is a parameter so tests need no clock tricks.
+    pub async fn sweep_stale(&self, now: f64, max_age_secs: f64) -> Vec<String> {
+        let stale: Vec<String> = self
+            .agents
+            .read()
+            .await
+            .iter()
+            .filter(|(_, c)| now - c.last_seen > max_age_secs)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in &stale {
+            self.unregister_agent(id).await;
+        }
+        stale
+    }
+
+
 
     pub async fn forward(
         &self,
@@ -122,7 +175,14 @@ impl IngressRegistry {
             body,
             responder: tx,
         };
-        sender.send(req).map_err(|_| "agent disconnected".to_string())?;
+        // 0.1.1: bounded queue with honest backpressure — a full agent
+        // queue fails fast instead of growing memory without bound.
+        sender
+            .try_send(req)
+            .map_err(|e| match e {
+                mpsc::error::TrySendError::Full(_) => "agent overloaded".to_string(),
+                mpsc::error::TrySendError::Closed(_) => "agent disconnected".to_string(),
+            })?;
         tokio::time::timeout(std::time::Duration::from_secs(30), rx)
             .await
             .map_err(|_| "tunnel timeout".to_string())?

@@ -14,9 +14,14 @@ Agent masks `Via/X-Forwarded-*` and forwards `{id,method,url,headers,body}` → 
 
 `egress.mode: tunnel` provider uses `agent_id` + `base_url` via `IngressRegistry` channel.
 
-## Known tunnel limitations (release 0.1.0)
+## Tunnel hardening (0.1.1)
 
-- Registry channel and pending-request map have no limits or deadline cleanup; an agent record may linger after disconnect.
-- The agent forwards HTTP sequentially, with no global request timeout and no reconnect loop with backoff — a crashed agent needs a manual restart.
-- `TunnelProvider` does not implement `chat_stream`: streaming over the tunnel is unavailable (returns `streaming unsupported`).
-- No connection heartbeat — a silent drop is only noticed on the next request.
+- Bounded per-agent queue (16): overflow fails fast with `agent overloaded` instead of growing memory.
+- Heartbeat: the gateway pings every 30s, agents silent over 90s are dropped; disconnect cleans the agent record and tunnel (next forward fails at once with `no tunnel`, in-flight ones resolve as `agent dropped`, not a 30s hang).
+- The agent reconnects on its own (backoff 1s→60s, `--max-retries N`, `0` keeps the old exit behavior); every forward is bounded by 120s.
+- Covered by unit tests (unregister/sweep/bounded/heartbeat-flag/backoff) + `real_tunnel_test` on real binaries (including reconnect).
+
+## Residual limitations
+
+- The agent forwards sequentially (one request at a time).
+- `TunnelProvider` does not implement `chat_stream`: streaming over the tunnel is unavailable — deliberate, explicit `streaming unsupported` error (stream frames are out of 0.1.1 scope).

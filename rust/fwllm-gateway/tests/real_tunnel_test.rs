@@ -270,6 +270,8 @@ async fn real_agent_wrong_token_rejected() {
         "--token",
         "wrong-token-xyz",
         "--insecure",
+        "--max-retries",
+        "0",
     ]);
     let status = tokio::time::timeout(Duration::from_secs(20), agent.wait())
         .await
@@ -295,12 +297,46 @@ async fn real_agent_wrong_ca_rejected() {
         &token,
         "--ca-cert",
         &other_str,
+        "--max-retries",
+        "0",
     ]);
     let status = tokio::time::timeout(Duration::from_secs(20), agent.wait())
         .await
         .expect("agent with wrong CA should exit")
         .unwrap();
     assert!(!status.success(), "wrong CA must fail TLS verification");
+}
+
+#[tokio::test]
+async fn real_agent_reconnects_with_backoff_then_gives_up() {
+    // 0.1.1: against a dead port the agent retries (1s + 2s backoff) and
+    // only then exits nonzero — it must not spin hot nor die instantly.
+    ensure_agent_built();
+    let start = std::time::Instant::now();
+    let status = tokio::process::Command::new(agent_bin())
+        .args([
+            "--gateway-url",
+            "wss://127.0.0.1:19999/ingress",
+            "--token",
+            "whatever",
+            "--insecure",
+            "--max-retries",
+            "2",
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .expect("agent spawn")
+        .wait()
+        .await
+        .unwrap();
+    let elapsed = start.elapsed();
+    assert!(!status.success());
+    assert!(
+        elapsed >= std::time::Duration::from_secs(3),
+        "backoff not observed: {elapsed:?}"
+    );
 }
 
 #[tokio::test]

@@ -27,6 +27,10 @@ struct Args {
     ca_cert: Option<String>,
     #[arg(long, default_value_t = false)]
     insecure: bool,
+    /// 0.1.1: stop after N failed attempts instead of retrying forever.
+    /// 0 keeps the old exit-on-first-failure behavior (scripts/tests).
+    #[arg(long)]
+    max_retries: Option<u32>,
 }
 
 pub fn mask_headers(headers: &mut HeaderMap) {
@@ -100,9 +104,11 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
     let args = Args::parse();
     tracing::info!("connecting to {}", args.gateway_url);
-    let request = build_request(&args.gateway_url, &args.token)?;
 
-    let mut client_builder = reqwest::Client::builder();
+    let mut client_builder = reqwest::Client::builder()
+        // 0.1.1: every forwarded request is bounded — a hung upstream must
+        // not wedge the agent's sequential forward loop forever.
+        .timeout(std::time::Duration::from_secs(120));
     if args.insecure {
         client_builder = client_builder.danger_accept_invalid_certs(true);
     } else if let Some(ca_path) = &args.ca_cert {
@@ -137,11 +143,55 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let connector = ws_config.map(tokio_tungstenite::Connector::Rustls);
+    // 0.1.1: reconnect loop — a dropped tunnel re-establishes with backoff
+    // instead of exiting (exit code used to be the only signal).
+    let mut attempt: u32 = 0;
+    loop {
+        let request = build_request(&args.gateway_url, &args.token)?;
+        let outcome = serve_once(request, &http_client, connector.clone()).await;
+        attempt = attempt.saturating_add(1);
+        if let Some(max) = args.max_retries {
+            if attempt > max {
+                // Old behavior for scripts/tests: surface the last result.
+                return match outcome {
+                    Ok(()) => Ok(()),
+                    Err(e) => Err(e),
+                };
+            }
+        }
+        match &outcome {
+            Ok(()) => tracing::info!("tunnel closed by gateway, reconnecting"),
+            Err(e) => tracing::warn!("tunnel error: {e:#}, reconnecting"),
+        }
+        let delay = backoff_delay(attempt);
+        tracing::info!("reconnect attempt {attempt} in {delay:?}");
+        tokio::time::sleep(delay).await;
+    }
+}
+
+/// 0.1.1: exponential backoff 1s, 2s, 4s … capped at 60s. Pure for tests.
+pub fn backoff_delay(attempt: u32) -> std::time::Duration {
+    let secs = 1u64.checked_shl(attempt.saturating_sub(1).min(6)).unwrap_or(64);
+    std::time::Duration::from_secs(secs.min(60))
+}
+
+async fn serve_once(
+    request: WsRequest<()>,
+    http_client: &reqwest::Client,
+    connector: Option<tokio_tungstenite::Connector>,
+) -> anyhow::Result<()> {
+    use tokio_tungstenite::tungstenite::Message;
     let (mut ws, _) =
         tokio_tungstenite::connect_async_tls_with_config(request, None, false, connector).await?;
     tracing::info!("tunnel established");
     while let Some(msg) = ws.next().await {
         let msg = msg?;
+        // 0.1.1: answer gateway heartbeat pings explicitly (do not rely on
+        // library auto-pong); ignore anything that is not a text frame.
+        if msg.is_ping() {
+            ws.send(Message::Pong(msg.into_data())).await?;
+            continue;
+        }
         if msg.is_text() {
             let text = msg.to_text()?;
             if let Ok(mut frame) = serde_json::from_str::<serde_json::Value>(text) {
@@ -174,7 +224,7 @@ async fn main() -> anyhow::Result<()> {
                     let url = obj.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string();
                     let method = obj.get("method").and_then(|v| v.as_str()).unwrap_or("GET").to_string();
                     let id = obj.get("id").cloned().unwrap_or(serde_json::Value::String("0".into()));
-                    let resp = forward(&http_client, &method, &url, &frame).await;
+                    let resp = forward(http_client, &method, &url, &frame).await;
                     let reply = serde_json::json!({
                         "id": id,
                         "status": resp.status,
@@ -236,6 +286,18 @@ mod tests {
         assert_eq!(headers.get("upgrade").unwrap(), "websocket");
         assert_eq!(headers.get("sec-websocket-version").unwrap(), "13");
         assert_eq!(headers.get("authorization").unwrap(), "Bearer secret-token");
+    }
+
+    #[test]
+    fn backoff_grows_exponentially_and_caps() {
+        use std::time::Duration;
+        assert_eq!(backoff_delay(1), Duration::from_secs(1));
+        assert_eq!(backoff_delay(2), Duration::from_secs(2));
+        assert_eq!(backoff_delay(3), Duration::from_secs(4));
+        assert_eq!(backoff_delay(6), Duration::from_secs(32));
+        assert_eq!(backoff_delay(7), Duration::from_secs(60));
+        assert_eq!(backoff_delay(100), Duration::from_secs(60));
+        assert_eq!(backoff_delay(0), Duration::from_secs(1));
     }
 
     #[test]
