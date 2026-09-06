@@ -1,9 +1,7 @@
 //! TDD Red: tunnel egress provider forwards via agent with header masking.
 
-use fwllm_gateway::providers::{Provider, ProviderError};
-use serde_json::{json, Value};
-use std::pin::Pin;
-use std::future::Future;
+use fwllm_gateway::providers::Provider;
+use serde_json::json;
 
 // fake tunnel registry + provider will be injected; here we test masking directly
 use fwllm_gateway::ingress::mask_for_tunnel;

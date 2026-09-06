@@ -62,7 +62,9 @@ async def test_fail_closed_rejects_when_redis_unreachable():
         clients={CLIENT_KEY: "alice"},
         quotas=Quotas(client_tokens_per_day=10, backend_fail_closed=True),
     )
-    metering = Metering(BrokenRedis(), quotas={"client_tokens_per_day": 10}, backend_fail_closed=True)
+    metering = Metering(
+        BrokenRedis(), quotas={"client_tokens_per_day": 10}, backend_fail_closed=True
+    )
     app = create_app(cfg, providers={"mock": FakeProvider()}, metering=metering)
     from fastapi.testclient import TestClient as TC
     with TC(app) as c:

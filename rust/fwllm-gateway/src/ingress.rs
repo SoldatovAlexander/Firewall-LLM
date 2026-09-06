@@ -165,7 +165,7 @@ pub fn mask_for_tunnel(
         // case-insensitive removal
         headers.retain(|k, _| k.to_ascii_lowercase() != key);
     }
-    let has_ua = headers.keys().any(|k| k.to_ascii_lowercase() == "user-agent");
+    let has_ua = headers.keys().any(|k| k.eq_ignore_ascii_case("user-agent"));
     if !has_ua {
         headers.insert("User-Agent".to_string(), "Firewall-LLM-Agent/0.1".to_string());
     }

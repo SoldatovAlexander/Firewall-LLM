@@ -188,7 +188,7 @@ impl PolicyEngine {
         let day = day_string(now);
         let mapping = self.routing.model_mapping.get(requested_model).cloned();
 
-        for (idx, candidate) in candidates.iter().enumerate() {
+        for candidate in &candidates {
             let violating: Vec<_> = self
                 .routing
                 .rules

@@ -1,0 +1,27 @@
+name: Rust CI
+
+on:
+  push:
+    branches: [main]
+    paths: ["rust/**", ".github/workflows/rust.yml"]
+  pull_request:
+    paths: ["rust/**", ".github/workflows/rust.yml"]
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+      - name: Lint (clippy)
+        run: cargo clippy -p fwllm-core -p fwllm-gateway -p fwllm-agent --all-targets --locked -- -D warnings
+      - name: Test
+        run: cargo test --workspace --locked

@@ -1,0 +1,11 @@
+target/
+**/.venv/
+**/__pycache__/
+**/*.db
+.env
+.env.*
+secrets/
+vault.json
+*.pem
+*.key
+.git/

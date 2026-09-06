@@ -141,7 +141,7 @@ class PolicyEngine:
         candidates = self._chain_candidates()
         mapping = self._routing.model_mapping.get(requested_model, {})
         # Check each candidate against rules, handling action
-        for idx, candidate in enumerate(candidates):
+        for candidate in candidates:
             violating = [r for r in self._routing.rules if self._violates_rule(candidate, r)]
             if not violating:
                 return candidate, mapping.get(candidate, requested_model)

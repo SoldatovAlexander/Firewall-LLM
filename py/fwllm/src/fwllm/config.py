@@ -173,7 +173,8 @@ class Config(BaseModel):
     providers: dict[str, ProviderConfig]
     # client API token -> label
     clients: dict[str, str] = Field(default_factory=dict)
-    # admin API tokens (separate from clients) -> label, for /admin/*. If empty, fall back to clients with admin scope.
+    # admin API tokens (separate from clients) -> label, for /admin/*.
+    # If empty, fall back to clients with admin scope.
     admin_clients: dict[str, str] = Field(default_factory=dict)
     quotas: Quotas = Field(default_factory=Quotas)
     inspectors: InspectorsConfig = Field(default_factory=InspectorsConfig)

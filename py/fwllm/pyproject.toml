@@ -17,7 +17,7 @@ dependencies = [
     "PyYAML>=6.0",
     "redis>=5.0",
     "prometheus-client>=0.20",
-    "lightanon @ git+https://github.com/SoldatovAlexander/lightanon_project.git",
+    "lightanon @ git+https://github.com/SoldatovAlexander/lightanon_project.git@b4a0bfd20bfab72e1b29316df5acd3a8dcd9bc35",
 ]
 
 [project.optional-dependencies]
@@ -25,6 +25,7 @@ dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
     "respx>=0.21",
+    "fakeredis>=2.20",
     "ruff>=0.4",
     "mypy>=1.9",
     "types-PyYAML",
@@ -53,7 +54,4 @@ select = ["E", "F", "I", "UP", "B", "S"]
 [tool.mypy]
 python_version = "3.12"
 strict = true
-
-[[tool.mypy.overrides]]
-module = "lightanon.*"
-ignore_missing_imports = true
+mypy_path = "stubs"

@@ -1,11 +1,10 @@
 //! E2E: gateway -> agent tunnel -> destination, verify header masking.
 
-use axum::body::Body;
 use axum::extract::Request;
 use axum::routing::post;
 use fwllm_gateway::ingress::{shared_registry, ProxyResponse};
 use fwllm_gateway::providers::{Provider, TunnelProvider};
-use serde_json::{json, Value};
+use serde_json::json;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
@@ -48,7 +47,7 @@ async fn e2e_tunnel_masks_headers() {
     registry.register_tunnel(agent_id.to_string(), tx).await;
 
     tokio::spawn({
-        let registry_clone = registry.clone();
+        let _registry_clone = registry.clone();
         async move {
             while let Some(req) = rx.recv().await {
                 // Fake agent: forward to mock_url with masked headers (already masked by registry)
@@ -105,9 +104,9 @@ async fn e2e_tunnel_masks_headers() {
     // Verify mock destination did NOT receive masked headers
     let headers = received_headers.lock().unwrap().clone().unwrap();
     // header names are lowercased by axum/http
-    assert!(!headers.keys().any(|k| k.to_ascii_lowercase() == "via"));
-    assert!(!headers.keys().any(|k| k.to_ascii_lowercase() == "x-forwarded-for"));
-    assert!(headers.keys().any(|k| k.to_ascii_lowercase() == "content-type"));
+    assert!(!headers.keys().any(|k| k.eq_ignore_ascii_case("via")));
+    assert!(!headers.keys().any(|k| k.eq_ignore_ascii_case("x-forwarded-for")));
+    assert!(headers.keys().any(|k| k.eq_ignore_ascii_case("content-type")));
 
     // Also verify TunnelProvider path still works
     let res = provider.chat(payload).await;

@@ -200,7 +200,7 @@ async fn handle_ingress_socket(
                             "headers": proxy_req.headers,
                             "body": proxy_req.body,
                         });
-                        if socket.send(Message::Text(frame.to_string().into())).await.is_err() {
+                        if socket.send(Message::Text(frame.to_string())).await.is_err() {
                             break;
                         }
                     }
@@ -304,7 +304,6 @@ async fn stream_response(
                 let client_id = client_id.clone();
                 let provider_name = provider_name.clone();
                 let model = model.clone();
-                let started = started;
                 mapped.chain(futures_util::stream::once(async move {
                     let guard = last_usage.lock().unwrap();
                     let prompt = guard

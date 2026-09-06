@@ -10,10 +10,12 @@ pub struct ChainState {
     pub dlp: DlpState,
 }
 
+type PublishCallback = std::sync::Arc<dyn Fn(String, String, String) + Send + Sync>;
+
 pub struct InspectorChain {
     cfg: InspectorsConfig,
     ml: Option<MlInjectionInspector>,
-    publish: Option<std::sync::Arc<dyn Fn(String, String, String) + Send + Sync>>,
+    publish: Option<PublishCallback>,
 }
 
 impl InspectorChain {
@@ -23,7 +25,7 @@ impl InspectorChain {
                 .ok_or_else(|| fwllm_core::config::ConfigError::Validation(
                     "injection.ml is enabled but no model could be loaded - provide a valid model_dir with model.onnx/tokenizer.json".to_string()
                 ))?;
-            Some(MlInjectionInspector::new(classifier, cfg.injection.ml.threshold as f32, cfg.injection.block_severity_gte.clone(), cfg.injection.mode.clone()))
+            Some(MlInjectionInspector::new(classifier, cfg.injection.ml.threshold as f32))
         } else { None };
         Ok(Self { cfg: cfg.clone(), ml, publish: None })
     }
@@ -31,7 +33,7 @@ impl InspectorChain {
     #[cfg(test)]
     pub fn from_config_with_classifier(cfg: &InspectorsConfig, classifier: Box<dyn super::ml::TextClassifier>) -> Self {
         let ml = if cfg.injection.ml.enabled {
-            Some(MlInjectionInspector::new(classifier, cfg.injection.ml.threshold as f32, cfg.injection.block_severity_gte.clone(), cfg.injection.mode.clone()))
+            Some(MlInjectionInspector::new(classifier, cfg.injection.ml.threshold as f32))
         } else { None };
         Self { cfg: cfg.clone(), ml, publish: None }
     }

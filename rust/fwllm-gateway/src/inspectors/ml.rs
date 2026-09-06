@@ -104,13 +104,11 @@ pub fn try_load_classifier(dir: &str) -> Option<Box<dyn TextClassifier>> {
 pub struct MlInjectionInspector {
     classifier: Box<dyn TextClassifier>,
     threshold: f32,
-    block_gte: String,
-    mode: String,
 }
 
 impl MlInjectionInspector {
-    pub fn new(classifier: Box<dyn TextClassifier>, threshold: f32, block_gte: String, mode: String) -> Self {
-        Self { classifier, threshold, block_gte, mode }
+    pub fn new(classifier: Box<dyn TextClassifier>, threshold: f32) -> Self {
+        Self { classifier, threshold }
     }
 
     pub fn scan(&self, text: &str) -> Option<(&'static str, &'static str)> {

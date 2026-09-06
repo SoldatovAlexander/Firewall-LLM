@@ -3,9 +3,10 @@ WORKDIR /build
 COPY rust/Cargo.toml rust/Cargo.lock ./
 COPY rust/fwllm-core ./fwllm-core
 COPY rust/fwllm-gateway ./fwllm-gateway
+COPY rust/fwllm-agent ./fwllm-agent
 # prefetch deps cache
-RUN cargo fetch
-RUN cargo build --release -p fwllm-gateway
+RUN cargo fetch --locked
+RUN cargo build --locked --release -p fwllm-gateway
 
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*

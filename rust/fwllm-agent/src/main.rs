@@ -121,7 +121,7 @@ async fn main() -> anyhow::Result<()> {
         None
     };
 
-    let connector = ws_config.map(|c| tokio_tungstenite::Connector::Rustls(c));
+    let connector = ws_config.map(tokio_tungstenite::Connector::Rustls);
     let (mut ws, _) =
         tokio_tungstenite::connect_async_tls_with_config(request, None, false, connector).await?;
     tracing::info!("tunnel established");
@@ -166,7 +166,7 @@ async fn main() -> anyhow::Result<()> {
                         "headers": resp.headers,
                         "body": resp.body,
                     });
-                    ws.send(tokio_tungstenite::tungstenite::Message::Text(reply.to_string().into())).await?;
+                    ws.send(tokio_tungstenite::tungstenite::Message::Text(reply.to_string())).await?;
                 }
             }
         }

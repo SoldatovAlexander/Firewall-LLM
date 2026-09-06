@@ -11,7 +11,6 @@ from typing import Annotated, Any, TypeVar
 from fastapi import Depends, FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import StreamingResponse
-from prometheus_client import make_asgi_app
 from pydantic import BaseModel, Field
 
 from fwllm.audit import AuditLog, ensure_parent
@@ -97,10 +96,18 @@ async def _require_admin(request: Request) -> str:
     if admin_clients:
         if token in admin_clients:
             return admin_clients[token]
-        raise ApiError(status=403, type_="permission_error", message="admin privileges required", code="admin_required")
+        raise ApiError(
+            status=403,
+            type_="permission_error",
+            message="admin privileges required",
+            code="admin_required",
+        )
     # Fallback: if no admin tokens configured, allow any valid client but warn (insecure)
     if token in clients:
-        logger.warning("admin endpoint accessed with client token; configure admin_clients for proper isolation")
+        logger.warning(
+            "admin endpoint accessed with client token; "
+            "configure admin_clients for proper isolation"
+        )
         return clients[token]
     raise auth_error("invalid API key", code="invalid_api_key")
 
@@ -392,10 +399,10 @@ def create_app(
                                 inspectors._inspectors, ctx.parts, strict=False
                             ):
                                 if hasattr(inspector, "restore_stream_text"):
-                                    delta = inspector.restore_stream_text(delta, part)  # type: ignore[attr-defined]
+                                    delta = inspector.restore_stream_text(delta, part)
                             chunk["choices"][0]["delta"]["content"] = delta
                         except Exception:
-                            pass
+                            logger.debug("streaming DLP restore failed", exc_info=True)
                         response_parts.append(delta)
                     yield f"data: {json.dumps(chunk, separators=(',', ':'))}\n\n"
             except BlockedError as exc:
@@ -409,7 +416,7 @@ def create_app(
                 yield f"data: {json.dumps(err.as_dict(), separators=(',', ':'))}\n\n"
                 return
             finally:
-                # Record metering from usage if available, else 0 (will be corrected by tokenizer estimate in future)
+                # Record metering from usage if available, else 0
                 prompt_tokens = int((last_usage or {}).get("prompt_tokens", 0))
                 completion_tokens = int((last_usage or {}).get("completion_tokens", 0))
                 if prompt_tokens or completion_tokens:
@@ -422,7 +429,7 @@ def create_app(
                             completion=completion_tokens,
                         )
                     except Exception:
-                        pass
+                        logger.debug("streaming metering record failed", exc_info=True)
                 _metrics(
                     code,
                     prompt=prompt_tokens,
@@ -433,8 +440,8 @@ def create_app(
 
         return StreamingResponse(sse(), media_type="text/event-stream")
 
-    from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
     from fastapi.responses import Response as FastAPIResponse
+    from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
     @app.get("/metrics")
     async def metrics(request: Request) -> FastAPIResponse:

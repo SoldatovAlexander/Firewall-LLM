@@ -6,7 +6,7 @@ use http_body_util::BodyExt;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::future::Future;
 use tower::ServiceExt;
 
