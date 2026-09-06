@@ -37,6 +37,10 @@ services:
       - ./fwllm.yaml:/etc/fwllm/fwllm.yaml:ro
       - ./certs:/certs
       - ./data-rust:/data
+      # R14: required when injection.ml is enabled (model_dir, e.g. /models/pi).
+      # The gateway fails fast on an unloadable model instead of silently
+      # running without ML, so a missing mount is a startup error, not a gap.
+      - ./models:/models:ro
 
   prometheus:
     image: prom/prometheus:v2.53.0
