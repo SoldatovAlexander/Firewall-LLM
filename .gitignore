@@ -38,8 +38,13 @@ docs/RELEASE_CODE_REVIEW_2026-09-06.md
 # OS
 .DS_Store
 
-# Deploy runtime data
+# Deploy runtime data (per-machine compose stack, never commit)
 deploy/data/
+deploy/data-rust/
+deploy/certs/
+deploy/models/
+deploy/fwllm.yaml
+deploy/prometheus-data/
 
 # Office temp files
 ~$*
