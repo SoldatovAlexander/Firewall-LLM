@@ -1,8 +1,14 @@
 //! Metering: daily token/request counters, quotas (429), fail-open.
+//!
+//! 0.1.1 async backends: the Redis store is fully async (multiplexed
+//! connection, per-op deadlines) so slow backends never stall the request
+//! loop. SQLite audit stays synchronous by design (sub-ms WAL writes).
 
-use redis::Commands;
 use std::collections::HashMap;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+/// Per-op deadline: a hung backend fails fast instead of stalling loop tasks.
+const REDIS_OP_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, thiserror::Error)]
 pub enum MeteringError {
@@ -62,14 +68,15 @@ pub struct SettleReq {
 }
 
 /// Storage abstraction so tests can run without Redis.
+#[async_trait::async_trait]
 pub trait MeteringStore: Send + Sync {
-    fn incr(&self, key: &str, amount: i64) -> Result<i64, String>;
-    fn get(&self, key: &str) -> Result<i64, String>;
-    fn ping(&self) -> Result<(), String>;
-    fn reserve(&self, req: &AdmitOp) -> Result<(), ReserveError>;
+    async fn incr(&self, key: &str, amount: i64) -> Result<i64, String>;
+    async fn get(&self, key: &str) -> Result<i64, String>;
+    async fn ping(&self) -> Result<(), String>;
+    async fn reserve(&self, req: &AdmitOp) -> Result<(), ReserveError>;
     /// Returns true when the settle was applied (false = already settled or
     /// expired reservation — a no-op by design).
-    fn settle(&self, req: &SettleReq) -> Result<bool, String>;
+    async fn settle(&self, req: &SettleReq) -> Result<bool, String>;
 }
 
 pub struct InMemoryStore {
@@ -86,20 +93,21 @@ impl Default for InMemoryStore {
     }
 }
 
+#[async_trait::async_trait]
 impl MeteringStore for InMemoryStore {
-    fn incr(&self, key: &str, amount: i64) -> Result<i64, String> {
+    async fn incr(&self, key: &str, amount: i64) -> Result<i64, String> {
         let mut map = self.counters.lock().unwrap();
         let entry = map.entry(key.to_string()).or_default();
         *entry += amount;
         Ok(*entry)
     }
-    fn get(&self, key: &str) -> Result<i64, String> {
+    async fn get(&self, key: &str) -> Result<i64, String> {
         Ok(self.counters.lock().unwrap().get(key).copied().unwrap_or(0))
     }
-    fn ping(&self) -> Result<(), String> {
+    async fn ping(&self) -> Result<(), String> {
         Ok(())
     }
-    fn reserve(&self, req: &AdmitOp) -> Result<(), ReserveError> {
+    async fn reserve(&self, req: &AdmitOp) -> Result<(), ReserveError> {
         // Single lock section: atomic for one process (test backend).
         let mut map = self.counters.lock().unwrap();
         let get = |map: &HashMap<String, i64>, key: &str| {
@@ -125,7 +133,7 @@ impl MeteringStore for InMemoryStore {
         *map.entry(req.m_tokens_key.clone()).or_default() += req.reserve;
         Ok(())
     }
-    fn settle(&self, req: &SettleReq) -> Result<bool, String> {
+    async fn settle(&self, req: &SettleReq) -> Result<bool, String> {
         let mut settled = self.settled.lock().unwrap();
         if !settled.insert(req.reservation_key.clone()) {
             return Ok(false);
@@ -148,33 +156,61 @@ impl RedisStore {
     pub fn new(url: &str) -> Result<Self, redis::RedisError> {
         Ok(Self { client: redis::Client::open(url)? })
     }
+
+    /// 0.1.1: async multiplexed connection per op with a deadline. A refused
+    /// host fails fast (no retry loop); a hung backend trips the deadline.
+    /// (Deliberately no cache: correctness first — pooling is a later
+    /// optimization. The pre-async code also connected per op.)
+    async fn conn(&self) -> Result<redis::aio::MultiplexedConnection, String> {
+        with_deadline(self.client.get_multiplexed_async_connection(), "connect").await
+    }
 }
 
+async fn with_deadline<T, E>(
+    fut: impl std::future::Future<Output = Result<T, E>>,
+    ctx: &str,
+) -> Result<T, String>
+where
+    E: std::fmt::Display,
+{
+    tokio::time::timeout(REDIS_OP_TIMEOUT, fut)
+        .await
+        .map_err(|_| format!("redis op timeout ({ctx})"))?
+        .map_err(|e| e.to_string())
+}
+
+#[async_trait::async_trait]
+#[async_trait::async_trait]
 impl MeteringStore for RedisStore {
-    fn incr(&self, key: &str, amount: i64) -> Result<i64, String> {
-        let mut conn = self.client.get_connection().map_err(|e| e.to_string())?;
-        conn.incr(key, amount).map_err(|e| e.to_string())
+    async fn incr(&self, key: &str, amount: i64) -> Result<i64, String> {
+        use redis::AsyncCommands;
+        let mut conn = self.conn().await?;
+        with_deadline(conn.incr(key, amount), "incr").await
     }
-    fn get(&self, key: &str) -> Result<i64, String> {
-        let mut conn = self.client.get_connection().map_err(|e| e.to_string())?;
-        conn.get(key).map_err(|e| e.to_string())
+    async fn get(&self, key: &str) -> Result<i64, String> {
+        use redis::AsyncCommands;
+        let mut conn = self.conn().await?;
+        // Missing keys read as zero (daily buckets start empty).
+        let val: Option<i64> =
+            with_deadline(conn.get(key), "get").await?;
+        Ok(val.unwrap_or(0))
     }
-    fn ping(&self) -> Result<(), String> {
-        let mut conn = self.client.get_connection().map_err(|e| e.to_string())?;
-        redis::cmd("PING")
-            .query::<String>(&mut conn)
-            .map_err(|e| e.to_string())?;
+    async fn ping(&self) -> Result<(), String> {
+        let mut conn = self.conn().await?;
+        with_deadline(
+            redis::cmd("PING").query_async::<String>(&mut conn),
+            "ping",
+        )
+        .await?;
         Ok(())
     }
-    fn reserve(&self, req: &AdmitOp) -> Result<(), ReserveError> {
+    async fn reserve(&self, req: &AdmitOp) -> Result<(), ReserveError> {
         // R05: one Lua script — check and reserve are atomic across
         // processes. Standalone/Sentinel only; Cluster rejects cross-slot
         // scripts (documented, same as Python).
-        let mut conn = self
-            .client
-            .get_connection()
-            .map_err(|e| ReserveError::Backend(e.to_string()))?;
-        let res: Vec<redis::Value> = redis::Script::new(ADMIT_LUA)
+        let mut conn = self.conn().await.map_err(ReserveError::Backend)?;
+        let script = redis::Script::new(ADMIT_LUA);
+        script
             .key(&req.c_tokens_key)
             .key(&req.c_req_key)
             .key(&req.p_tokens_key)
@@ -186,9 +222,11 @@ impl MeteringStore for RedisStore {
             .arg(req.p_tokens_limit)
             .arg(req.reserve)
             .arg(req.reservation_ttl_secs as i64)
-            .arg(req.bucket_ttl_secs as i64)
-            .invoke(&mut conn)
-            .map_err(|e| ReserveError::Backend(e.to_string()))?;
+            .arg(req.bucket_ttl_secs as i64);
+        let invoke = script.invoke_async(&mut conn);
+        let res: Vec<redis::Value> = with_deadline(invoke, "reserve")
+            .await
+            .map_err(ReserveError::Backend)?;
         match res.as_slice() {
             [redis::Value::BulkString(status), _] if status == b"ok" => Ok(()),
             [redis::Value::BulkString(scope), _] if scope == b"requests" => {
@@ -200,17 +238,18 @@ impl MeteringStore for RedisStore {
             _ => Err(ReserveError::Denied(ReserveDenied::ClientTokens)),
         }
     }
-    fn settle(&self, req: &SettleReq) -> Result<bool, String> {
-        let mut conn = self.client.get_connection().map_err(|e| e.to_string())?;
-        let applied: i64 = redis::Script::new(SETTLE_LUA)
+    async fn settle(&self, req: &SettleReq) -> Result<bool, String> {
+        let mut conn = self.conn().await?;
+        let script = redis::Script::new(SETTLE_LUA);
+        script
             .key(&req.reservation_key)
             .key(&req.token_keys[0])
             .key(&req.token_keys[1])
             .key(&req.token_keys[2])
             .arg(req.delta)
-            .arg(req.bucket_ttl_secs as i64)
-            .invoke(&mut conn)
-            .map_err(|e| e.to_string())?;
+            .arg(req.bucket_ttl_secs as i64);
+        let invoke = script.invoke_async(&mut conn);
+        let applied: i64 = with_deadline(invoke, "settle").await?;
         Ok(applied == 1)
     }
 }
@@ -304,21 +343,22 @@ impl Metering {
 
     /// R11: in fail-closed mode the backend is verified on every check,
     /// even when no numeric quotas are set — same semantics as Python.
-    fn ensure_ready(&self) -> Result<(), MeteringError> {
+    async fn ensure_ready(&self) -> Result<(), MeteringError> {
         if self.backend_fail_closed {
             self.store
                 .ping()
+                .await
                 .map_err(MeteringError::BackendUnavailable)?;
         }
         Ok(())
     }
 
     /// Check daily quotas. Err(QuotaExceeded) -> 429; Err(BackendUnavailable) when fail-closed -> 503.
-    pub fn check_client(&self, client_id: &str) -> Result<(), MeteringError> {
-        self.ensure_ready()?;
+    pub async fn check_client(&self, client_id: &str) -> Result<(), MeteringError> {
+        self.ensure_ready().await?;
         let day = self.day();
         if let Some(limit) = self.client_tokens_per_day {
-            let used = match self.store.get(&format!("fwllm:c:tokens:{client_id}:{day}")) {
+            let used = match self.store.get(&format!("fwllm:c:tokens:{client_id}:{day}")).await {
                 Ok(v) => v,
                 Err(e) => {
                     if self.backend_fail_closed {
@@ -332,7 +372,7 @@ impl Metering {
             }
         }
         if let Some(limit) = self.client_requests_per_day {
-            let used = match self.store.get(&format!("fwllm:c:req:{client_id}:{day}")) {
+            let used = match self.store.get(&format!("fwllm:c:req:{client_id}:{day}")).await {
                 Ok(v) => v,
                 Err(e) => {
                     if self.backend_fail_closed {
@@ -348,11 +388,11 @@ impl Metering {
         Ok(())
     }
 
-    pub fn check_provider(&self, provider: &str) -> Result<(), MeteringError> {
-        self.ensure_ready()?;
+    pub async fn check_provider(&self, provider: &str) -> Result<(), MeteringError> {
+        self.ensure_ready().await?;
         if let Some(limit) = self.provider_tokens_per_day {
             let day = self.day();
-            let used = match self.store.get(&format!("fwllm:p:tokens:{provider}:{day}")) {
+            let used = match self.store.get(&format!("fwllm:p:tokens:{provider}:{day}")).await {
                 Ok(v) => v,
                 Err(e) => {
                     if self.backend_fail_closed {
@@ -371,7 +411,7 @@ impl Metering {
         Ok(())
     }
 
-    pub fn record(
+    pub async fn record(
         &self,
         client_id: &str,
         provider: &str,
@@ -381,11 +421,11 @@ impl Metering {
     ) {
         let day = self.day();
         let total = prompt + completion;
-        let _ = self.store.incr(&format!("fwllm:c:tokens:{client_id}:{day}"), total);
-        let _ = self.store.incr(&format!("fwllm:c:req:{client_id}:{day}"), 1);
-        let _ = self.store.incr(&format!("fwllm:p:tokens:{provider}:{day}"), total);
-        let _ = self.store.incr(&format!("fwllm:p:req:{provider}:{day}"), 1);
-        let _ = self.store.incr(&format!("fwllm:m:tokens:{model}:{day}"), total);
+        let _ = self.store.incr(&format!("fwllm:c:tokens:{client_id}:{day}"), total).await;
+        let _ = self.store.incr(&format!("fwllm:c:req:{client_id}:{day}"), 1).await;
+        let _ = self.store.incr(&format!("fwllm:p:tokens:{provider}:{day}"), total).await;
+        let _ = self.store.incr(&format!("fwllm:p:req:{provider}:{day}"), 1).await;
+        let _ = self.store.incr(&format!("fwllm:m:tokens:{model}:{day}"), total).await;
     }
 
     fn token_keys(&self, rsv: &Reservation) -> (String, String, String) {
@@ -400,7 +440,7 @@ impl Metering {
     /// Atomically check quotas and reserve budget (R05). The reserve is the
     /// prompt estimate plus the completion cap handed to the adapter.
     /// Denied admission consumes nothing.
-    pub fn admit(
+    pub async fn admit(
         &self,
         client_id: &str,
         provider: &str,
@@ -408,7 +448,7 @@ impl Metering {
         prompt_est: i64,
         completion_cap: Option<i64>,
     ) -> Result<Reservation, MeteringError> {
-        self.ensure_ready()?;
+        self.ensure_ready().await?;
         let day = self.day();
         let rsv = Reservation {
             id: format!(
@@ -436,7 +476,7 @@ impl Metering {
             reservation_ttl_secs: RSV_TTL_SECS,
             bucket_ttl_secs: BUCKET_TTL_SECS,
         };
-        match self.store.reserve(&op) {
+        match self.store.reserve(&op).await {
             Ok(()) => Ok(rsv),
             Err(ReserveError::Denied(denied)) => {
                 let (scope, limit) = match denied {
@@ -460,7 +500,7 @@ impl Metering {
 
     /// Reconcile a reservation with actual usage, exactly once (R05).
     /// Best-effort like record: backend errors are ignored.
-    pub fn settle(&self, rsv: &Reservation, prompt: i64, completion: i64) {
+    pub async fn settle(&self, rsv: &Reservation, prompt: i64, completion: i64) {
         let delta = (prompt + completion) - rsv.reserved_total();
         let (ctok, ptok, mtok) = self.token_keys(rsv);
         let _ = self.store.settle(&SettleReq {
@@ -468,7 +508,7 @@ impl Metering {
             token_keys: vec![ctok, ptok, mtok],
             delta,
             bucket_ttl_secs: BUCKET_TTL_SECS,
-        });
+        }).await;
     }
 }
 

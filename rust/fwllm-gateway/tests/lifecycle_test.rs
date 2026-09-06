@@ -176,7 +176,15 @@ async fn stream_disconnect_audited_as_cancelled() {
     let res = post(&app, r#"{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}],"stream":true}"#).await;
     assert_eq!(res.status(), 200);
     drop(res); // client disconnect without reading: exactly one cancelled row
-    let all = rows(&state);
+    // 0.1.1 async: Drop finalizes via a spawned task — poll briefly.
+    let mut all = rows(&state);
+    for _ in 0..100 {
+        if all.len() == 1 {
+            break;
+        }
+        tokio::task::yield_now().await;
+        all = rows(&state);
+    }
     assert_eq!(all.len(), 1);
     assert_eq!(all[0].code, "cancelled");
 }

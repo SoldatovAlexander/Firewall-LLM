@@ -412,10 +412,11 @@ struct StreamAccountant {
 }
 
 impl StreamAccountant {
-    /// Record metering exactly once; returns (prompt, completion, source).
-    fn record_once(&self) -> (u64, u64, &'static str) {
+    /// Pure usage computation (no I/O): provider usage wins, otherwise the
+    /// estimate fallback. Sync so Drop can use it.
+    fn usage_numbers(&self) -> (u64, u64, &'static str) {
         let guard = self.last_usage.lock().unwrap();
-        let (prompt, done, source) = match guard
+        match guard
             .as_ref()
             .and_then(|u| u.as_object())
             .filter(|o| !o.is_empty())
@@ -436,16 +437,19 @@ impl StreamAccountant {
                 let (p, d) = estimate_usage(&self.request_text, &completion);
                 (p, d, "estimated")
             }
-        };
-        drop(guard);
+        }
+    }
+
+    /// Metering I/O exactly once (flag shared with the Drop path).
+    async fn settle_once(&self, prompt: u64, done: u64) {
         if self.recorded.swap(true, Ordering::SeqCst) {
-            return (prompt, done, source);
+            return;
         }
         // R05: reconcile the admission reserve; fall back to a plain record
         // when admission was skipped (fail-open without reservation).
         if let Some(metering) = &self.state.metering {
             if let Some(rsv) = &self.reservation {
-                metering.settle(rsv, prompt as i64, done as i64);
+                metering.settle(rsv, prompt as i64, done as i64).await;
             } else {
                 metering.record(
                     &self.client_id,
@@ -453,27 +457,56 @@ impl StreamAccountant {
                     &self.model,
                     prompt as i64,
                     done as i64,
-                );
+                ).await;
             }
         }
-        (prompt, done, source)
     }
 }
 
 impl Drop for StreamAccountant {
     fn drop(&mut self) {
-        // R12: disconnect before the terminal chunk — best-effort metering
-        // plus the single final audit row as "cancelled" (or
-        // "upstream_error" when a mid-stream item already failed). A no-op
-        // after normal finish or an already-audited open failure.
-        let (prompt, done, source) = self.record_once();
+        // R12 + 0.1.1 async: disconnect before the terminal chunk. Drop
+        // cannot await, so the best-effort finalize runs as a spawned task;
+        // without a running runtime it is skipped (the terminal chunk covers
+        // normal finish). Audit finish is idempotent — a no-op after normal
+        // finish or an already-audited open failure.
+        let (prompt, done, source) = self.usage_numbers();
         let code = if self.stream_error.load(Ordering::SeqCst) {
             "upstream_error"
         } else {
             "cancelled"
         };
         let response_text = self.completion_text.lock().unwrap().clone();
-        self.lifecycle.finish(code, prompt as i64, done as i64, &response_text, source);
+        let state = self.state.clone();
+        let recorded = self.recorded.clone();
+        let reservation = self.reservation.clone();
+        let lifecycle = self.lifecycle.clone();
+        let client_id = self.client_id.clone();
+        let provider_name = self.provider_name.clone();
+        let model = self.model.clone();
+        let task = async move {
+            if !recorded.swap(true, Ordering::SeqCst) {
+                if let Some(metering) = &state.metering {
+                    if let Some(rsv) = &reservation {
+                        metering.settle(rsv, prompt as i64, done as i64).await;
+                    } else {
+                        metering
+                            .record(
+                                &client_id,
+                                &provider_name,
+                                &model,
+                                prompt as i64,
+                                done as i64,
+                            )
+                            .await;
+                    }
+                }
+            }
+            lifecycle.finish(code, prompt as i64, done as i64, &response_text, source);
+        };
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(task);
+        }
     }
 }
 
@@ -647,7 +680,8 @@ async fn stream_response(
                     // R03: always count the admitted request, even on zero
                     // usage; Drop covers the disconnect path with the flag.
                     let _guard = accountant_done;
-                    let (prompt, done, source) = _guard.record_once();
+                    let (prompt, done, source) = _guard.usage_numbers();
+                    _guard.settle_once(prompt, done).await;
                     // R06: feed served usage to routing (normal finish; the
                     // disconnect Drop path updates metering only — router
                     // counters are a best-effort mirror, metering is truth).
@@ -702,7 +736,7 @@ async fn stream_response(
             if let Some(metering) = &state.metering {
                 if let Some(rsv) = &reservation {
                     let (prompt_est, _) = estimate_usage(&request_text, "");
-                    metering.settle(rsv, prompt_est as i64, 0);
+                    metering.settle(rsv, prompt_est as i64, 0).await;
                 }
             }
             metrics::observe_request(
@@ -1005,7 +1039,7 @@ async fn chat_completions(
                 &body.model,
                 prompt_est as i64,
                 body.max_tokens,
-            ) {
+            ).await {
                 Ok(rsv) => Some(rsv),
                 Err(crate::metering::MeteringError::QuotaExceeded { scope, limit }) => {
                     metrics::observe_request(&client_id, &provider_name, &body.model, "rate_limited", 0.0, 0, 0);
@@ -1108,7 +1142,7 @@ async fn chat_completions(
             // R05: reconcile the admission reserve with actual usage.
             if let Some(metering) = &state.metering {
                 if let Some(rsv) = &reservation {
-                    metering.settle(rsv, prompt as i64, done as i64);
+                    metering.settle(rsv, prompt as i64, done as i64).await;
                 } else {
                     metering.record(
                         &client_id,
@@ -1116,7 +1150,7 @@ async fn chat_completions(
                         &body.model,
                         prompt as i64,
                         done as i64,
-                    );
+                    ).await;
                 }
             }
             // R06: feed served usage to routing before the next admission,
@@ -1144,7 +1178,7 @@ async fn chat_completions(
             // R05: input may have been spent; completion never happened.
             if let Some(metering) = &state.metering {
                 if let Some(rsv) = &reservation {
-                    metering.settle(rsv, prompt_est as i64, 0);
+                    metering.settle(rsv, prompt_est as i64, 0).await;
                 }
             }
             metrics::observe_request(&client_id, &provider_name, &body.model, "upstream_error", duration, 0, 0);

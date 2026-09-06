@@ -184,3 +184,48 @@ def test_routed_from_flag_needed_when_remapped():
     )
     provider, model = engine.resolve("gpt-4o", "alice")
     assert model != "gpt-4o"
+
+
+def test_resolve_thread_safe_under_concurrency():
+    """0.1.1 async: resolve() runs in worker threads while on_event() runs
+    on the loop thread — concurrent use must not corrupt routing."""
+    import threading
+
+    from fwllm.config import RoutingConfig
+
+    engine = PolicyEngine(RoutingConfig(default_chain=["primary", "backup"]))
+    errors: list[BaseException] = []
+    results: list[tuple[str, str]] = []
+    lock = threading.Lock()
+
+    def resolve_many():
+        try:
+            for _ in range(50):
+                # resolve itself runs WITHOUT the test lock: genuine
+                # concurrency against the engine's internal lock.
+                outcome = engine.resolve("gpt-4o", "alice")
+                with lock:
+                    results.append(outcome)
+        except BaseException as exc:  # noqa: BLE001
+            with lock:
+                errors.append(exc)
+
+    def publish_many():
+        try:
+            for i in range(50):
+                engine.on_event(
+                    Event("tokens_spent", {"provider": "primary", "total_tokens": i})
+                )
+        except BaseException as exc:  # noqa: BLE001
+            with lock:
+                errors.append(exc)
+
+    threads = [threading.Thread(target=resolve_many) for _ in range(4)]
+    threads += [threading.Thread(target=publish_many) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert not errors
+    assert len(results) == 200
+    assert all(r == ("primary", "gpt-4o") for r in results)

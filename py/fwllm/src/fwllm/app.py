@@ -372,7 +372,10 @@ def create_app(
             )
 
         try:
-            provider_name, concrete_model = router.resolve(body.model, client_id)
+            # 0.1.1 async: routing does sync store I/O — off the loop.
+            provider_name, concrete_model = await asyncio.to_thread(
+                router.resolve, body.model, client_id
+            )
         except QuotaExceeded as exc:
             _metrics("rate_limited")
             _audit_now(
@@ -394,9 +397,13 @@ def create_app(
         if provider is None:
             raise upstream_error(f"routed provider '{provider_name}' not configured")
 
-        # Common pre-processing for both streaming and non-streaming
+        # Common pre-processing for both streaming and non-streaming.
+        # 0.1.1 async: inspectors are CPU-bound sync code (ML inference when
+        # enabled) — off the loop; BlockedError propagates through to_thread.
         try:
-            ctx = inspectors.process_request(payload, client=client_id)
+            ctx = await asyncio.to_thread(
+                inspectors.process_request, payload, client=client_id
+            )
         except BlockedError as exc:
             _metrics("blocked")
             _audit_now("blocked", str(exc), messages=body.model_dump()["messages"])

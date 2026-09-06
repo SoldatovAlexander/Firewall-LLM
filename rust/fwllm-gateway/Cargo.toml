@@ -24,7 +24,8 @@ thiserror = { workspace = true }
 bytes = "1"
 regex = "1"
 rusqlite = { version = "0.32", features = ["bundled"] }
-redis = { version = "0.27", default-features = false, features = ["script"] }
+redis = { version = "0.27", default-features = false, features = ["script", "tokio-comp"] }
+async-trait = "0.1"
 futures-util = { workspace = true }
 tokio-util = { workspace = true }
 axum-server = { version = "0.7", features = ["tls-rustls"] }

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import TypeVar
@@ -41,6 +42,10 @@ class PolicyEngine:
         self._clock = clock or _default_clock
         self._store = store or InMemoryRouterStore()
         self._attack_times: dict[str, list[datetime]] = {}
+        # 0.1.1 async: resolve() runs in a worker thread (see app.py) while
+        # on_event() runs on the loop thread — this lock makes the shared
+        # in-memory state safe across both.
+        self._lock = threading.Lock()
 
     @staticmethod
     def validate_routing(routing: RoutingConfig, known_providers: list[str]) -> None:
@@ -75,38 +80,39 @@ class PolicyEngine:
         )
 
     def on_event(self, event: Event) -> None:
-        if event.name == "tokens_spent":
-            provider = str(event.data.get("provider", ""))
-            amount = int(event.data.get("total_tokens", 0))
-            day = self._day()
-            self._safe(lambda: self._store.incr_tokens((provider, day), amount), None)
-            return
-        af: AttackFailoverConfig = self._routing.attack_failover
-        if not af.enabled or event.name != "attack_detected":
-            return
-        severity = str(event.data.get("severity", "low"))
-        if _SEVERITY[severity] < _SEVERITY[af.min_severity]:
-            return
-        now = self._clock()
-        window_start = now.timestamp() - af.window_seconds
-        source = str(event.data.get("client", ""))
-        # Per-client window
-        lst = self._attack_times.get(source, [])
-        lst = [ts for ts in lst if ts.timestamp() >= window_start]
-        lst.append(now)
-        self._attack_times[source] = lst
-        if len(lst) < af.count:
-            return
-        lst.clear()
-        if af.block_source and source:
-            until = now.timestamp() + af.block_ttl_seconds
-            self._safe(lambda: self._store.block_source(source, until), None)
-        if af.switch_to:
-            cooldown_until = now.timestamp() + af.cooldown_seconds
-            switch_provider = af.switch_to
-            self._safe(
-                lambda: self._store.set_override(switch_provider, cooldown_until), None
-            )
+        with self._lock:
+            if event.name == "tokens_spent":
+                provider = str(event.data.get("provider", ""))
+                amount = int(event.data.get("total_tokens", 0))
+                day = self._day()
+                self._safe(lambda: self._store.incr_tokens((provider, day), amount), None)
+                return
+            af: AttackFailoverConfig = self._routing.attack_failover
+            if not af.enabled or event.name != "attack_detected":
+                return
+            severity = str(event.data.get("severity", "low"))
+            if _SEVERITY[severity] < _SEVERITY[af.min_severity]:
+                return
+            now = self._clock()
+            window_start = now.timestamp() - af.window_seconds
+            source = str(event.data.get("client", ""))
+            # Per-client window
+            lst = self._attack_times.get(source, [])
+            lst = [ts for ts in lst if ts.timestamp() >= window_start]
+            lst.append(now)
+            self._attack_times[source] = lst
+            if len(lst) < af.count:
+                return
+            lst.clear()
+            if af.block_source and source:
+                until = now.timestamp() + af.block_ttl_seconds
+                self._safe(lambda: self._store.block_source(source, until), None)
+            if af.switch_to:
+                cooldown_until = now.timestamp() + af.cooldown_seconds
+                switch_provider = af.switch_to
+                self._safe(
+                    lambda: self._store.set_override(switch_provider, cooldown_until), None
+                )
 
     def _chain_candidates(self) -> list[str]:
         chain = list(self._routing.default_chain) or ["default"]
@@ -130,36 +136,37 @@ class PolicyEngine:
         return True
 
     def resolve(self, requested_model: str, client_id: str) -> tuple[str, str]:
-        from fwllm.metering import QuotaExceeded
+        with self._lock:
+            from fwllm.metering import QuotaExceeded
 
-        now_ts = self._now_ts()
-        if self._safe(lambda: self._store.is_blocked(client_id, now_ts), False):
-            raise BlockedError(
-                "request source is temporarily blocked", reason="blocked_source"
-            )
+            now_ts = self._now_ts()
+            if self._safe(lambda: self._store.is_blocked(client_id, now_ts), False):
+                raise BlockedError(
+                    "request source is temporarily blocked", reason="blocked_source"
+                )
 
-        candidates = self._chain_candidates()
-        mapping = self._routing.model_mapping.get(requested_model, {})
-        # Check each candidate against rules, handling action
-        for candidate in candidates:
-            violating = [r for r in self._routing.rules if self._violates_rule(candidate, r)]
-            if not violating:
-                return candidate, mapping.get(candidate, requested_model)
-            # Handle first violating rule's action
-            rule = violating[0]
-            if rule.action.switch_to:
-                switch_to = rule.action.switch_to
-                # Validate switch_to is known
-                if switch_to in candidates:
-                    # Move switch_to to front and re-evaluate
+            candidates = self._chain_candidates()
+            mapping = self._routing.model_mapping.get(requested_model, {})
+            # Check each candidate against rules, handling action
+            for candidate in candidates:
+                violating = [r for r in self._routing.rules if self._violates_rule(candidate, r)]
+                if not violating:
+                    return candidate, mapping.get(candidate, requested_model)
+                # Handle first violating rule's action
+                rule = violating[0]
+                if rule.action.switch_to:
+                    switch_to = rule.action.switch_to
+                    # Validate switch_to is known
+                    if switch_to in candidates:
+                        # Move switch_to to front and re-evaluate
+                        continue
+                    return switch_to, mapping.get(switch_to, requested_model)
+                if rule.action.next_in_chain:
+                    # Skip to next candidate
                     continue
-                return switch_to, mapping.get(switch_to, requested_model)
-            if rule.action.next_in_chain:
-                # Skip to next candidate
-                continue
-        # All candidates exhausted
-        raise QuotaExceeded(
-            f"all providers in chain {candidates} exceeded budget/rules",
-            limit=0,
-            scope="provider_budget",
-        )
+            # All candidates exhausted
+            raise QuotaExceeded(
+                f"all providers in chain {candidates} exceeded budget/rules",
+                limit=0,
+                scope="provider_budget",
+            )
