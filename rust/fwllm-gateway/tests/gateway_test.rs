@@ -459,6 +459,125 @@ async fn contract_ranges_rejected_with_422() {
     }
 }
 
+struct NoUsageStream {
+    calls: Mutex<Vec<Value>>,
+}
+
+impl Provider for NoUsageStream {
+    fn chat(&self, _p: Value) -> ChatFuture {
+        unreachable!()
+    }
+    fn chat_stream(&self, p: Value) -> fwllm_gateway::providers::StreamFuture {
+        use futures_util::stream;
+        self.calls.lock().unwrap().push(p);
+        Box::pin(async move {
+            let items: Vec<Result<Value, ProviderError>> = vec![
+                Ok(json!({"choices":[{"delta":{"content":"Hel"}}]})),
+                Ok(json!({"choices":[{"delta":{"content":"lo!"}}]})),
+            ];
+            Ok(Box::pin(stream::iter(items))
+                as Pin<Box<dyn futures_util::Stream<Item = Result<Value, ProviderError>> + Send>>)
+        })
+    }
+}
+
+fn stream_app_with_quotas(
+    provider: Arc<NoUsageStream>,
+    quotas: fwllm_core::config::Quotas,
+) -> axum::Router {
+    use fwllm_gateway::metering::{InMemoryStore, Metering};
+    let cfg = base_config(None);
+    let mut providers: HashMap<String, Arc<dyn Provider>> = HashMap::new();
+    providers.insert("primary".into(), provider.clone());
+    providers.insert("backup".into(), provider);
+    let metering = Metering::new(Box::new(InMemoryStore::default()), &quotas);
+    fwllm_gateway::build_app_with_metering(cfg, Some(Arc::new(providers)), Some(metering))
+}
+
+fn quotas(requests: Option<i64>, tokens: Option<i64>) -> fwllm_core::config::Quotas {
+    fwllm_core::config::Quotas {
+        client_tokens_per_day: tokens,
+        client_requests_per_day: requests,
+        provider_tokens_per_day: None,
+        backend_fail_closed: false,
+    }
+}
+
+async fn post_stream(app: &axum::Router) -> axum::http::StatusCode {
+    use http_body_util::BodyExt;
+    let res = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header(auth_header().0, auth_header().1)
+                .body(Body::from(
+                    r#"{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}],"stream":true}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = res.status();
+    // R03: consume the body like a real client; the terminal chunk runs the
+    // accounting exactly once.
+    let _ = res.into_body().collect().await.unwrap().to_bytes();
+    status
+}
+
+#[tokio::test]
+async fn stream_drop_without_read_still_records_request() {
+    // R03: unread body dropped (client disconnect) still counts via Drop.
+    let provider = Arc::new(NoUsageStream { calls: Mutex::new(vec![]) });
+    let app = stream_app_with_quotas(provider, quotas(Some(1), None));
+    let res = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header(auth_header().0, auth_header().1)
+                .body(Body::from(
+                    r#"{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}],"stream":true}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 200);
+    drop(res);
+    assert_eq!(post_stream(&app).await, 429);
+}
+
+#[tokio::test]
+async fn stream_without_usage_counts_request_second_is_429() {
+    let provider = Arc::new(NoUsageStream { calls: Mutex::new(vec![]) });
+    let app = stream_app_with_quotas(provider, quotas(Some(1), None));
+    assert_eq!(post_stream(&app).await, 200);
+    assert_eq!(post_stream(&app).await, 429);
+}
+
+#[tokio::test]
+async fn stream_without_usage_estimates_tokens() {
+    // "Hello!" estimates to >= 1 token, so a 1-token quota trips on retry.
+    let provider = Arc::new(NoUsageStream { calls: Mutex::new(vec![]) });
+    let app = stream_app_with_quotas(provider, quotas(None, Some(1)));
+    assert_eq!(post_stream(&app).await, 200);
+    assert_eq!(post_stream(&app).await, 429);
+}
+
+#[tokio::test]
+async fn stream_payload_asks_for_include_usage() {
+    let provider = Arc::new(NoUsageStream { calls: Mutex::new(vec![]) });
+    let app = stream_app_with_quotas(provider.clone(), quotas(None, None));
+    assert_eq!(post_stream(&app).await, 200);
+    let sent = provider.calls.lock().unwrap()[0].clone();
+    assert_eq!(sent["stream_options"]["include_usage"], true);
+}
+
 #[tokio::test]
 async fn stream_open_failure_maps_to_502() {
     struct FailingStream;

@@ -24,7 +24,7 @@ from fwllm.errors import (
     validation_error_handler,
 )
 from fwllm.inspectors.chain import InspectorChain
-from fwllm.metering import Metering, QuotaExceeded
+from fwllm.metering import Metering, QuotaExceeded, estimate_usage
 from fwllm.observability.metrics import observe_request
 from fwllm.providers.base import BlockedError, Provider, ProviderError
 from fwllm.router.policy import PolicyEngine
@@ -62,6 +62,8 @@ class ChatCompletionRequest(BaseModel):
     stop: str | list[str] | None = None
     # Client-side per contract; accepted but never forwarded upstream.
     metadata: dict[str, Any] | None = None
+    # R03: user-supplied stream options are preserved and forwarded upstream.
+    stream_options: dict[str, Any] | None = None
 
     def to_payload(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -69,11 +71,31 @@ class ChatCompletionRequest(BaseModel):
             "messages": [m.model_dump(exclude_none=True) for m in self.messages],
             "stream": self.stream,
         }
-        for opt in ("temperature", "top_p", "max_tokens", "stop"):
+        for opt in ("temperature", "top_p", "max_tokens", "stop", "stream_options"):
             value = getattr(self, opt)
             if value is not None:
                 payload[opt] = value
+        if self.stream:
+            # R03: ask supporting providers for a terminal usage chunk so
+            # streaming responses can be accounted exactly. An explicit user
+            # choice is respected; absence defaults to True.
+            options = dict(payload.get("stream_options") or {})
+            options.setdefault("include_usage", True)
+            payload["stream_options"] = options
         return payload
+
+
+def _prompt_text(payload: dict[str, Any]) -> str:
+    """Join request message contents for usage estimation (R03)."""
+    parts: list[str] = []
+    messages = payload.get("messages") or []
+    if isinstance(messages, list):
+        for message in messages:
+            if isinstance(message, dict):
+                content = message.get("content")
+                if isinstance(content, str):
+                    parts.append(content)
+    return "\n".join(parts)
 
 
 async def _require_client(request: Request) -> str:
@@ -186,6 +208,7 @@ def create_app(
         response_text: str,
         prompt_tokens: int = 0,
         completion_tokens: int = 0,
+        usage_source: str = "upstream",
     ) -> None:
         if not audit_log.enabled:
             return
@@ -197,6 +220,7 @@ def create_app(
                 code=code,
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
+                usage_source=usage_source,
                 messages=messages,
                 response_text=response_text,
             )
@@ -290,6 +314,7 @@ def create_app(
             prompt_tokens: int = 0,
             completion_tokens: int = 0,
             messages: list[dict[str, Any]] | None = None,
+            usage_source: str = "upstream",
         ) -> None:
             _audit_write(
                 client=client_id,
@@ -300,6 +325,7 @@ def create_app(
                 response_text=response_text,
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
+                usage_source=usage_source,
             )
 
         # Common pre-processing for both streaming and non-streaming
@@ -361,9 +387,21 @@ def create_app(
             result = inspectors.process_response(result, ctx)
             if concrete_model != body.model:
                 result["routed_from"] = body.model
+            response_text = "\n".join(
+                choice.get("message", {}).get("content") or ""
+                for choice in result.get("choices", [])
+            )
+            # R03: provider usage wins; otherwise estimate from text and mark it.
             usage = result.get("usage") or {}
-            prompt_tokens = int(usage.get("prompt_tokens", 0))
-            completion_tokens = int(usage.get("completion_tokens", 0))
+            if usage:
+                prompt_tokens = int(usage.get("prompt_tokens", 0))
+                completion_tokens = int(usage.get("completion_tokens", 0))
+                usage_source = "upstream"
+            else:
+                prompt_tokens, completion_tokens = estimate_usage(
+                    _prompt_text(payload), response_text
+                )
+                usage_source = "estimated"
             await _metering_safe(
                 metering.record(
                     client=client_id,
@@ -371,13 +409,13 @@ def create_app(
                     model=body.model,
                     prompt=prompt_tokens,
                     completion=completion_tokens,
+                    usage_source=usage_source,
                 )
             )
-            response_text = "\n".join(
-                choice.get("message", {}).get("content") or ""
-                for choice in result.get("choices", [])
+            _audit_now(
+                "ok", response_text, prompt_tokens, completion_tokens,
+                usage_source=usage_source,
             )
-            _audit_now("ok", response_text, prompt_tokens, completion_tokens)
             _metrics("ok", prompt=prompt_tokens, completion=completion_tokens)
             return result
 
@@ -443,26 +481,39 @@ def create_app(
                 yield f"data: {json.dumps(err.as_dict(), separators=(',', ':'))}\n\n"
                 return
             finally:
-                # Record metering from usage if available, else 0
-                prompt_tokens = int((last_usage or {}).get("prompt_tokens", 0))
-                completion_tokens = int((last_usage or {}).get("completion_tokens", 0))
-                if prompt_tokens or completion_tokens:
-                    try:
-                        await metering.record(
-                            client=client_id,
-                            provider=provider_name,
-                            model=body.model,
-                            prompt=prompt_tokens,
-                            completion=completion_tokens,
-                        )
-                    except Exception:
-                        logger.debug("streaming metering record failed", exc_info=True)
+                # R03: always count the admitted request. Provider usage wins;
+                # otherwise estimate from the exchanged text and mark it.
+                # This single finalize site runs on completion, error and
+                # client disconnect, so accounting happens exactly once.
+                if last_usage:
+                    prompt_tokens = int(last_usage.get("prompt_tokens", 0))
+                    completion_tokens = int(last_usage.get("completion_tokens", 0))
+                    usage_source = "upstream"
+                else:
+                    prompt_tokens, completion_tokens = estimate_usage(
+                        _prompt_text(payload), "".join(response_parts)
+                    )
+                    usage_source = "estimated"
+                try:
+                    await metering.record(
+                        client=client_id,
+                        provider=provider_name,
+                        model=body.model,
+                        prompt=prompt_tokens,
+                        completion=completion_tokens,
+                        usage_source=usage_source,
+                    )
+                except Exception:
+                    logger.debug("streaming metering record failed", exc_info=True)
                 _metrics(
                     code,
                     prompt=prompt_tokens,
                     completion=completion_tokens,
                 )
-                _audit_now(code, "".join(response_parts), prompt_tokens, completion_tokens)
+                _audit_now(
+                    code, "".join(response_parts), prompt_tokens, completion_tokens,
+                    usage_source=usage_source,
+                )
             yield "data: [DONE]\n\n"
 
         return StreamingResponse(sse(), media_type="text/event-stream")

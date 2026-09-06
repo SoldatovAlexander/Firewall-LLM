@@ -21,6 +21,7 @@ pub struct AuditRecord {
     pub messages: String,
     #[serde(rename = "response_text")]
     pub response: String,
+    pub usage_source: String,
 }
 
 impl AuditLog {
@@ -42,10 +43,24 @@ impl AuditLog {
                 prompt_tokens INTEGER NOT NULL DEFAULT 0,
                 completion_tokens INTEGER NOT NULL DEFAULT 0,
                 messages TEXT NOT NULL,
-                response_text TEXT NOT NULL
+                response_text TEXT NOT NULL,
+                usage_source TEXT NOT NULL DEFAULT 'upstream'
             )",
             [],
         )?;
+        // R03: migrate pre-existing databases that lack the column.
+        let has_column: bool = conn
+            .prepare("PRAGMA table_info(audit)")?
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<Result<Vec<_>, _>>()?
+            .iter()
+            .any(|c| c == "usage_source");
+        if !has_column {
+            conn.execute(
+                "ALTER TABLE audit ADD COLUMN usage_source TEXT NOT NULL DEFAULT 'upstream'",
+                [],
+            )?;
+        }
         Ok(Self {
             enabled: config.enabled,
             dlp_redact: config.dlp_redact,
@@ -87,6 +102,7 @@ impl AuditLog {
         completion_tokens: i64,
         messages_json: &str,
         response_text: &str,
+        usage_source: &str,
     ) {
         if !self.enabled {
             return;
@@ -97,10 +113,12 @@ impl AuditLog {
         if let Ok(conn) = self.conn.lock() {
             let _ = conn.execute(
                 "INSERT INTO audit (ts, client, provider, model, code,
-                    prompt_tokens, completion_tokens, messages, response_text)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                    prompt_tokens, completion_tokens, messages, response_text,
+                    usage_source)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                 rusqlite::params![ts, client, provider, model, code,
-                    prompt_tokens, completion_tokens, messages, response],
+                    prompt_tokens, completion_tokens, messages, response,
+                    usage_source],
             );
         }
     }
@@ -113,7 +131,7 @@ impl AuditLog {
     ) -> Vec<AuditRecord> {
         let query = format!(
             "SELECT ts, client, provider, model, code, prompt_tokens,
-                    completion_tokens, messages, response_text
+                    completion_tokens, messages, response_text, usage_source
              FROM audit{} ORDER BY id DESC LIMIT {}",
             match (client.is_some(), code.is_some()) {
                 (true, true) => " WHERE client = ?1 AND code = ?2",
@@ -139,6 +157,7 @@ impl AuditLog {
                 completion_tokens: row.get(6)?,
                 messages: row.get(7)?,
                 response: row.get(8)?,
+                usage_source: row.get(9).unwrap_or_else(|_| "upstream".to_string()),
             })
         };
         let rows = match (client, code) {

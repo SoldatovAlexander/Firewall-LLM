@@ -111,6 +111,11 @@ class OpenAICompatAdapter:
 
     async def chat_stream(self, payload: dict[str, Any]) -> AsyncIterator[dict[str, Any]]:
         stream_payload = {**payload, "stream": True}
+        # R03: ask supporting providers for a terminal usage chunk so the
+        # gateway can account streaming responses exactly.
+        stream_options = dict(stream_payload.get("stream_options") or {})
+        stream_options.setdefault("include_usage", True)
+        stream_payload["stream_options"] = stream_options
         client = self._ensure_client()
         proxy_url = (
             self._proxy_manager.current() if self._proxy_manager else None

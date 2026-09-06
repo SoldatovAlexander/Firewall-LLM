@@ -22,7 +22,8 @@ use axum::{Json, Router};
 use fwllm_core::config::Config;
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::sync::Arc;
+use std::pin::Pin;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 /// Build the full application router.
@@ -241,6 +242,117 @@ async fn metrics_handler(
     ([(axum::http::header::CONTENT_TYPE, "text/plain; version=0.0.4")], body).into_response()
 }
 
+/// Heuristic token estimate (~4 chars per token) used when the provider
+/// sends no usage object (R03). Explicitly marked, never silently zero.
+fn estimate_usage(prompt_text: &str, completion_text: &str) -> (u64, u64) {
+    // chars (not bytes) for parity with the Python estimator.
+    (
+        prompt_text.chars().count() as u64 / 4,
+        completion_text.chars().count() as u64 / 4,
+    )
+}
+
+/// Join request message contents for usage estimation (R03).
+fn prompt_text(payload: &Value) -> String {
+    payload
+        .get("messages")
+        .and_then(|v| v.as_array())
+        .map(|messages| {
+            messages
+                .iter()
+                .filter_map(|m| m.get("content")?.as_str())
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .unwrap_or_default()
+}
+
+/// R03: exactly-once accounting for streamed responses.
+///
+/// The terminal `once` records on normal completion; the `Drop` impl covers
+/// client disconnect (axum drops the body stream, so the `once` future may
+/// never run). Both paths share one atomic flag, so usage is never double
+/// counted (coordinates with R05 reserves).
+struct StreamAccountant {
+    state: Arc<AppState>,
+    client_id: String,
+    provider_name: String,
+    model: String,
+    request_text: String,
+    completion_text: Arc<Mutex<String>>,
+    last_usage: Arc<Mutex<Option<Value>>>,
+    recorded: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl StreamAccountant {
+    /// Record metering exactly once; returns the (prompt, completion) pair.
+    fn record_once(&self) -> (u64, u64) {
+        if self
+            .recorded
+            .swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
+            return (0, 0);
+        }
+        let guard = self.last_usage.lock().unwrap();
+        let (prompt, done) = match guard
+            .as_ref()
+            .and_then(|u| u.as_object())
+            .filter(|o| !o.is_empty())
+        {
+            Some(usage) => (
+                usage
+                    .get("prompt_tokens")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0),
+                usage
+                    .get("completion_tokens")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0),
+            ),
+            None => {
+                let completion = self.completion_text.lock().unwrap().clone();
+                estimate_usage(&self.request_text, &completion)
+            }
+        };
+        drop(guard);
+        if let Some(metering) = &self.state.metering {
+            metering.record(
+                &self.client_id,
+                &self.provider_name,
+                &self.model,
+                prompt as i64,
+                done as i64,
+            );
+        }
+        (prompt, done)
+    }
+}
+
+impl Drop for StreamAccountant {
+    fn drop(&mut self) {
+        // Best-effort accounting on disconnect; a no-op after normal finish.
+        let _ = self.record_once();
+    }
+}
+
+/// Body stream wrapper that owns the accountant, so dropping the response
+/// (client disconnect) still records usage via the `Drop` impl above.
+struct AccountedStream {
+    inner: Pin<Box<dyn futures_util::Stream<Item = Result<Bytes, std::convert::Infallible>> + Send>>,
+    _accountant: StreamAccountant,
+}
+
+impl futures_util::Stream for AccountedStream {
+    type Item = Result<Bytes, std::convert::Infallible>;
+
+    fn poll_next(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        Pin::new(&mut self.inner).poll_next(cx)
+    }
+}
+
 async fn healthz() -> Json<Value> {
     Json(json!({"status": "ok"}))
 }
@@ -261,6 +373,8 @@ async fn stream_response(
     let client_id = client_id.to_string();
     let provider_name = provider_name.to_string();
     let model = model.to_string();
+    // R03: request text for usage estimation when the provider sends none.
+    let request_text = prompt_text(&payload);
     match provider.chat_stream(payload).await {
         Ok(stream) => {
             use futures_util::StreamExt;
@@ -275,6 +389,9 @@ async fn stream_response(
             let restore_clone = restore_session.clone();
             let last_usage = std::sync::Arc::new(std::sync::Mutex::new(None::<Value>));
             let last_usage_clone = last_usage.clone();
+            // R03: restored completion text feeds the estimate fallback.
+            let completion_text = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+            let completion_clone = completion_text.clone();
             let mapped = stream.map(move |item| {
                 let mut chunk = match item {
                     Ok(c) => c,
@@ -294,7 +411,14 @@ async fn stream_response(
                         )));
                     }
                 };
-                if chunk.get("usage").is_some() {
+                // R03: only a non-empty usage object counts as provider
+                // usage; anything else falls back to estimation.
+                if chunk
+                    .get("usage")
+                    .and_then(|u| u.as_object())
+                    .map(|o| !o.is_empty())
+                    .unwrap_or(false)
+                {
                     *last_usage_clone.lock().unwrap() = chunk.get("usage").cloned();
                 }
                 // R04: restore every choice by index, never assume choices[0].
@@ -311,6 +435,7 @@ async fn stream_response(
                         if let Some(delta) = delta {
                             let restored =
                                 restore_clone.lock().unwrap().feed(&delta);
+                            completion_clone.lock().unwrap().push_str(&restored);
                             if let Some(d) = choice.get_mut("delta") {
                                 d["content"] = json!(restored);
                             }
@@ -322,19 +447,28 @@ async fn stream_response(
                     chunk
                 )))
             });
+            // R03: single accountant shared by the terminal chunk (normal
+            // finish) and the Drop impl (client disconnect) — exactly once.
+            let accountant = StreamAccountant {
+                state: state.clone(),
+                client_id: client_id.clone(),
+                provider_name: provider_name.clone(),
+                model: model.clone(),
+                request_text,
+                completion_text: completion_text.clone(),
+                last_usage: last_usage.clone(),
+                recorded: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            };
             let with_done = {
-                let last_usage = last_usage.clone();
-                let state = state.clone();
-                let client_id = client_id.clone();
-                let provider_name = provider_name.clone();
-                let model = model.clone();
                 let restore_done = restore_session.clone();
+                let completion_done = completion_text.clone();
                 // Flush held-back trailing text (R13) ahead of [DONE].
                 let tail = mapped.chain(futures_util::stream::once(async move {
                     let flushed = restore_done.lock().unwrap().flush();
                     if flushed.is_empty() {
                         None
                     } else {
+                        completion_done.lock().unwrap().push_str(&flushed);
                         Some(Ok::<Bytes, std::convert::Infallible>(Bytes::from(format!(
                             "data: {}\n\n",
                             json!({
@@ -344,28 +478,25 @@ async fn stream_response(
                         ))))
                     }
                 }).filter_map(|x| async move { x }));
+                let accountant_done = StreamAccountant {
+                    state: accountant.state.clone(),
+                    client_id: accountant.client_id.clone(),
+                    provider_name: accountant.provider_name.clone(),
+                    model: accountant.model.clone(),
+                    request_text: accountant.request_text.clone(),
+                    completion_text: accountant.completion_text.clone(),
+                    last_usage: accountant.last_usage.clone(),
+                    recorded: accountant.recorded.clone(),
+                };
                 tail.chain(futures_util::stream::once(async move {
-                    let guard = last_usage.lock().unwrap();
-                    let prompt = guard
-                        .as_ref()
-                        .and_then(|u| u.get("prompt_tokens"))
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(0);
-                    let done = guard
-                        .as_ref()
-                        .and_then(|u| u.get("completion_tokens"))
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(0);
-                    drop(guard);
-                    if prompt != 0 || done != 0 {
-                        if let Some(metering) = &state.metering {
-                            metering.record(&client_id, &provider_name, &model, prompt as i64, done as i64);
-                        }
-                    }
+                    // R03: always count the admitted request, even on zero
+                    // usage; Drop covers the disconnect path with the flag.
+                    let _guard = accountant_done;
+                    let (prompt, done) = _guard.record_once();
                     metrics::observe_request(
-                        &client_id,
-                        &provider_name,
-                        &model,
+                        &_guard.client_id,
+                        &_guard.provider_name,
+                        &_guard.model,
                         "ok",
                         started.elapsed().as_secs_f64(),
                         prompt,
@@ -374,10 +505,14 @@ async fn stream_response(
                     Ok::<Bytes, std::convert::Infallible>(Bytes::from("data: [DONE]\n\n"))
                 }))
             };
+            let body_stream = AccountedStream {
+                inner: Box::pin(with_done),
+                _accountant: accountant,
+            };
             Response::builder()
                 .status(StatusCode::OK)
                 .header("content-type", "text/event-stream")
-                .body(Body::from_stream(with_done))
+                .body(Body::from_stream(body_stream))
                 .unwrap()
         }
         Err(err) => {
@@ -423,6 +558,9 @@ struct ChatCompletionRequest {
     #[serde(default)]
     #[allow(dead_code)]
     metadata: Option<Value>,
+    // R03: user-supplied stream options are preserved and forwarded upstream.
+    #[serde(default)]
+    stream_options: Option<Value>,
 }
 
 async fn require_client(
@@ -652,6 +790,23 @@ async fn chat_completions(
     if let Some(stop) = &body.stop {
         payload["stop"] = stop.clone();
     }
+    if let Some(options) = &body.stream_options {
+        if options.is_object() {
+            payload["stream_options"] = options.clone();
+        }
+    }
+    if body.stream {
+        // R03: ask supporting providers for a terminal usage chunk so
+        // streaming responses can be accounted exactly. An explicit user
+        // choice is respected; absence defaults to True.
+        let mut options = payload
+            .get("stream_options")
+            .and_then(|v| v.as_object())
+            .cloned()
+            .unwrap_or_default();
+        options.entry("include_usage".to_string()).or_insert(json!(true));
+        payload["stream_options"] = Value::Object(options);
+    }
 
     let chain_state = match state
         .inspectors
@@ -661,7 +816,7 @@ async fn chat_completions(
         Err(e) => {
             metrics::observe_request(&client_id, &provider_name, &body.model, "blocked", 0.0, 0, 0);
             if let Some(audit) = &state.audit {
-                audit.write(&client_id, &provider_name, &body.model, "blocked", 0, 0, &serde_json::to_string(&payload).unwrap_or_default(), &e.message);
+                audit.write(&client_id, &provider_name, &body.model, "blocked", 0, 0, &serde_json::to_string(&payload).unwrap_or_default(), &e.message, "upstream");
             }
             return e.into_response();
         }
@@ -686,9 +841,33 @@ async fn chat_completions(
                 let restored = state.inspectors.process_response(&content, &chain_state);
                 completion["choices"][0]["message"]["content"] = serde_json::Value::String(restored);
             }
-            let usage = completion.get("usage").cloned().unwrap_or(Value::Null);
-            let prompt = usage["prompt_tokens"].as_u64().unwrap_or(0);
-            let done = usage["completion_tokens"].as_u64().unwrap_or(0);
+            // R03: provider usage wins; otherwise estimate from the
+            // exchanged text and mark the source explicitly.
+            let (prompt, done, usage_source) =
+                match completion.get("usage").and_then(|u| u.as_object()) {
+                    Some(usage) if !usage.is_empty() => (
+                        usage.get("prompt_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
+                        usage.get("completion_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
+                        "upstream",
+                    ),
+                    _ => {
+                        let response_text: String = completion
+                            .get("choices")
+                            .and_then(|c| c.as_array())
+                            .map(|choices| {
+                                choices
+                                    .iter()
+                                    .filter_map(|ch| {
+                                        ch.get("message")?.get("content")?.as_str()
+                                    })
+                                    .collect::<Vec<_>>()
+                                    .join("\n")
+                            })
+                            .unwrap_or_default();
+                        let (p, d) = estimate_usage(&prompt_text(&payload), &response_text);
+                        (p, d, "estimated")
+                    }
+                };
             metrics::observe_request(
                 &client_id,
                 &provider_name,
@@ -715,6 +894,7 @@ async fn chat_completions(
                 audit.write(
                     &client_id, &provider_name, &body.model, "ok",
                     prompt as i64, done as i64, &payload_json, &response_text,
+                    usage_source,
                 );
             }
             (StatusCode::OK, Json(completion)).into_response()
@@ -724,7 +904,7 @@ async fn chat_completions(
             if let Some(audit) = &state.audit {
                 audit.write(
                     &client_id, &provider_name, &body.model, "upstream_error",
-                    0, 0, &payload_json, &err.to_string(),
+                    0, 0, &payload_json, &err.to_string(), "upstream",
                 );
             }
             let message = match &err {

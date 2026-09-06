@@ -31,10 +31,19 @@ class AuditLog:
                 prompt_tokens INTEGER NOT NULL DEFAULT 0,
                 completion_tokens INTEGER NOT NULL DEFAULT 0,
                 messages TEXT NOT NULL,
-                response_text TEXT NOT NULL
+                response_text TEXT NOT NULL,
+                usage_source TEXT NOT NULL DEFAULT 'upstream'
             )
             """
         )
+        # R03: migrate pre-existing databases that lack the column.
+        columns = [
+            row[1] for row in self._conn.execute("PRAGMA table_info(audit)")
+        ]
+        if "usage_source" not in columns:
+            self._conn.execute(
+                "ALTER TABLE audit ADD COLUMN usage_source TEXT NOT NULL DEFAULT 'upstream'"
+            )
         self._conn.commit()
 
     @property
@@ -58,6 +67,7 @@ class AuditLog:
         completion_tokens: int,
         messages: list[dict[str, Any]],
         response_text: str,
+        usage_source: str = "upstream",
     ) -> None:
         sanitizer = TextSanitizer(profile="ru_152")
         redacted_messages = [
@@ -76,8 +86,8 @@ class AuditLog:
                 """
                 INSERT INTO audit (ts, client, provider, model, code,
                                    prompt_tokens, completion_tokens,
-                                   messages, response_text)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                   messages, response_text, usage_source)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     datetime.now(UTC).isoformat(),
@@ -89,6 +99,7 @@ class AuditLog:
                     completion_tokens,
                     json.dumps(redacted_messages),
                     self._redact(response_text, sanitizer),
+                    usage_source,
                 ),
             )
             self._conn.commit()
@@ -102,7 +113,8 @@ class AuditLog:
     ) -> list[dict[str, Any]]:
         query = (
             "SELECT ts, client, provider, model, code, "
-            "prompt_tokens, completion_tokens, messages, response_text FROM audit"
+            "prompt_tokens, completion_tokens, messages, response_text, "
+            "usage_source FROM audit"
         )
         conditions: list[str] = []
         params: list[str] = []
@@ -129,6 +141,7 @@ class AuditLog:
                 "completion_tokens": row[6],
                 "messages": json.loads(row[7]),
                 "response_text": row[8],
+                "usage_source": row[9] if len(row) > 9 else "upstream",
             }
             for row in rows
         ]

@@ -194,6 +194,17 @@ impl OpenAiCompatProvider {
         let mut body = payload;
         if stream {
             body["stream"] = Value::Bool(true);
+            // R03: ask supporting providers for a terminal usage chunk so
+            // the gateway can account streaming responses exactly.
+            let mut options = body
+                .get("stream_options")
+                .and_then(|v| v.as_object())
+                .cloned()
+                .unwrap_or_default();
+            options
+                .entry("include_usage".to_string())
+                .or_insert(Value::Bool(true));
+            body["stream_options"] = Value::Object(options);
         }
         let mut req = self
             .http

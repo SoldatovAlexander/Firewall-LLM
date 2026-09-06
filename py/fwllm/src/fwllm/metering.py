@@ -128,7 +128,13 @@ class Metering:
         model: str,
         prompt: int,
         completion: int,
+        usage_source: str = "upstream",
     ) -> None:
+        """Record one admitted request (R03: always count, even on zero usage).
+
+        usage_source is "upstream" when the provider reported usage and
+        "estimated" when tokens were heuristically estimated from text.
+        """
         day = self._day()
         total = prompt + completion
         await self._incr(self._redis, f"fwllm:c:tokens:{client}:{day}", total)
@@ -144,6 +150,13 @@ class Metering:
                     "provider": provider,
                     "model": model,
                     "total_tokens": total,
+                    "usage_source": usage_source,
                 },
             )
         )
+
+
+def estimate_usage(prompt_text: str, completion_text: str) -> tuple[int, int]:
+    """Heuristic token estimate (~4 chars per token) used when the provider
+    sends no usage object (R03). Explicitly marked, never silently zero."""
+    return (len(prompt_text) // 4, len(completion_text) // 4)
