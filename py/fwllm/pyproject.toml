@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "fwllm"
-version = "0.1.0"
+version = "0.1.1"
 description = "Firewall LLM - security gateway for LLM traffic"
 license = "LicenseRef-FSL-1.1-MIT"
 requires-python = ">=3.11"

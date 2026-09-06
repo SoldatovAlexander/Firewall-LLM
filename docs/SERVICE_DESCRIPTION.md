@@ -1,6 +1,6 @@
 # Firewall LLM — как работает сервис
 
-**Версия:** 0.1.0 · **Лицензия:** FSL-1.1-MIT (ядро) · **Развёртывание:** on-prem, Docker Compose (Helm-чарт в репо есть, но k8s-поставка вне скоупа релиза 0.1.0 — см. §4; чарт проверен только статически: helm lint/template, kubeconform)
+**Версия:** 0.1.1 · **Лицензия:** FSL-1.1-MIT (ядро) · **Развёртывание:** on-prem, Docker Compose (Helm-чарт в репо есть, но k8s-поставка вне скоупа релиза 0.1.1 — см. §4; чарт проверен только статически: helm lint/template, kubeconform)
 
 ## 1. Что делает сервис
 
@@ -140,7 +140,7 @@ cd deploy
 cp fwllm.yaml.example fwllm.yaml
 cp .env.example .env   # заполнить ключи
 docker compose up -d --build   # gateway :8080, gateway-rust :8081, :8443 TLS, redis, prometheus, grafana
-# Helm — ВНЕ СКОУПА релиза 0.1.0 (возможен позже при развитии):
+# Helm — ВНЕ СКОУПА релиза 0.1.1 (возможен позже при развитии):
 # helm install fwllm ./deploy/helm/fwllm --set secret.openRouterApiKey=... --set secret.clientTokens="..."
 # Чарт никогда не ставился на живой кластер; живой k8s-acceptance (установка,
 # запись аудита, пересоздание pod) — отложен. secret.clientTokens ОБЯЗАТЕЛЕН

@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Firewall LLM Unified API
-  version: 0.1.0
+  version: 0.1.1
   description: >
     OpenAI-compatible unified entry point. One contract for all provider adapters
     (Python and Rust gateway branches).
