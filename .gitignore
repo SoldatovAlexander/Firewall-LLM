@@ -28,7 +28,7 @@ config.local.yaml
 .vscode/
 
 # Local-only: review inputs and helper envs, never push
-venv-metal/
+/venv-metal
 docs/RELEASE_CODE_REVIEW_2026-09-06.md
 
 # OS
