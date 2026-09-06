@@ -72,6 +72,37 @@ def test_metrics_client_token_stays_forbidden():
         assert c.get("/metrics", headers=_headers()).status_code == 403
 
 
+def test_multiproc_mode_aggregates_worker_files(tmp_path):
+    """0.1.1 capacity: with PROMETHEUS_MULTIPROC_DIR the render path reads
+    per-PID mmap files (uvicorn --workers) instead of process memory."""
+    import os
+    import subprocess
+    import sys
+
+    env = {
+        **os.environ,
+        "PROMETHEUS_MULTIPROC_DIR": str(tmp_path),
+        "PYTHONPATH": "src",
+    }
+    code = (
+        "from fwllm.observability.metrics import generate_metrics, observe_request;"
+        "observe_request(client='w', provider='p', model='m', code='ok',"
+        " duration=0.01, prompt=2, completion=3);"
+        "out = generate_metrics().decode();"
+        "assert 'fw_requests_total' in out, out;"
+        "print('MULTIPROC_OK')"
+    )
+    proc = subprocess.run(  # noqa: S603
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        env=env,
+        cwd=".",
+        timeout=60,
+    )
+    assert "MULTIPROC_OK" in proc.stdout, proc.stderr
+
+
 def test_gateway_upstream_error_metric_code():
     cfg = Config(
         providers={"mock": ProviderConfig(base_url="http://mock.local/v1")},

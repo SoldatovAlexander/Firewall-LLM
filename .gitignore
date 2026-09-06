@@ -51,6 +51,9 @@ deploy/prometheus-data/
 
 # runtime artifacts
 *.db
+*.db-wal
+*.db-shm
+*.db-journal
 
 # ML model artifacts
 *.zip

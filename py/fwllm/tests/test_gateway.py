@@ -87,6 +87,41 @@ def _body(**overrides: Any) -> dict[str, Any]:
     return payload
 
 
+async def test_inflight_guard_returns_429_not_queue_forever():
+    """0.1.1 capacity: a saturated server rejects fast instead of queueing."""
+    import asyncio
+
+    import httpx
+
+    release = asyncio.Event()
+
+    class BlockingProvider(FakeProvider):
+        async def chat(self, payload: dict[str, Any]) -> dict[str, Any]:
+            await release.wait()
+            return await super().chat(payload)
+
+    cfg = _config()
+    cfg.server.max_inflight_requests = 1
+    app = create_app(cfg, providers={"mock": BlockingProvider()})
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://test"
+    ) as http:
+
+        async def post_one() -> int:
+            r = await http.post(
+                "/v1/chat/completions", json=_body(), headers=_headers()
+            )
+            return r.status_code
+
+        first = asyncio.ensure_future(post_one())
+        await asyncio.sleep(0.3)  # let the first request take the slot
+        second = await post_one()
+        release.set()
+        assert await first == 200
+        assert second == 429
+
+
 # --- health & metrics -------------------------------------------------------
 
 

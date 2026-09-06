@@ -27,7 +27,11 @@ from fwllm.errors import (
 )
 from fwllm.inspectors.chain import InspectorChain
 from fwllm.metering import Metering, QuotaExceeded, Reservation, estimate_usage
-from fwllm.observability.metrics import observe_audit_error, observe_request
+from fwllm.observability.metrics import (
+    generate_metrics,
+    observe_audit_error,
+    observe_request,
+)
 from fwllm.providers.base import BlockedError, Provider, ProviderError
 from fwllm.router.policy import PolicyEngine
 
@@ -208,6 +212,10 @@ def create_app(
         )
         router = PolicyEngine(routing, store=store)
     app.state.router = router
+    # 0.1.1 capacity: concurrency guard state (see chat_completions).
+    app.state.inflight_lock = asyncio.Lock()
+    app.state.inflight_used = 0
+    app.state.inflight_max = config.server.max_inflight_requests
     metering.subscribe(router.on_event)
     inspectors.set_publish(router.on_event)
 
@@ -289,10 +297,14 @@ def create_app(
     async def chat_completions(
         body: ChatCompletionRequest,
         client_id: Annotated[str, Depends(_require_client)],
+        request: Request,
     ) -> Any:
         payload = body.to_payload()
         provider_name = "unrouted"
         started = time.monotonic()
+        # R12: every request carries an id through to its single final row.
+        # Moved up so even pre-routing refusals carry it.
+        request_id = uuid.uuid4().hex
 
         def _metrics(code: str, prompt: int = 0, completion: int = 0) -> None:
             observe_request(
@@ -305,37 +317,33 @@ def create_app(
                 completion=completion,
             )
 
-        try:
-            provider_name, concrete_model = router.resolve(body.model, client_id)
-        except QuotaExceeded as exc:
-            _metrics("rate_limited")
-            _audit_write(
-                client=client_id,
-                provider="unrouted",
-                model=body.model,
-                code="rate_limited",
-                messages=body.model_dump()["messages"],
-                response_text=str(exc),
-            )
-            raise rate_limit_error(str(exc)) from exc
-        except BlockedError as exc:
-            _metrics("blocked")
-            _audit_write(
-                client=client_id,
-                provider="unrouted",
-                model=body.model,
-                code="blocked_source",
-                messages=body.model_dump()["messages"],
-                response_text=str(exc),
-            )
-            raise blocked_error(str(exc), reason=exc.reason) from exc
-        payload["model"] = concrete_model
-        provider = app.state.providers.get(provider_name)
-        if provider is None:
-            raise upstream_error(f"routed provider '{provider_name}' not configured")
+        # 0.1.1 capacity: fail fast when saturated instead of queueing
+        # until client timeouts. The guard lock is held for microseconds
+        # only (no awaits inside), so admission itself never queues. Slot
+        # accounting is exact (no races); release happens in _audit_now
+        # (terminal choke point). One audit row on rejection, same as
+        # other early refusals.
+        async with request.app.state.inflight_lock:
+            if request.app.state.inflight_used >= request.app.state.inflight_max:
+                _metrics("rate_limited")
+                _audit_write(
+                    client=client_id,
+                    provider=provider_name,
+                    model=body.model,
+                    code="rate_limited",
+                    messages=body.model_dump()["messages"],
+                    response_text="server saturated: too many inflight requests",
+                )
+                raise rate_limit_error("server saturated: too many inflight requests")
+            request.app.state.inflight_used += 1
 
-        # R12: every request carries an id through to its single final row.
-        request_id = uuid.uuid4().hex
+        slot_held = True
+
+        def _release_slot() -> None:
+            nonlocal slot_held
+            if slot_held:
+                slot_held = False
+                request.app.state.inflight_used -= 1
 
         def _audit_now(
             code: str,
@@ -345,6 +353,11 @@ def create_app(
             messages: list[dict[str, Any]] | None = None,
             usage_source: str = "upstream",
         ) -> None:
+            # 0.1.1 capacity: _audit_now is the choke point of terminal
+            # outcomes (R12: exactly one final row per request), so the
+            # inflight slot is released here — covering present and future
+            # terminal paths with no per-site edits. Idempotent via flag.
+            _release_slot()
             _audit_write(
                 client=client_id,
                 provider=provider_name,
@@ -357,6 +370,29 @@ def create_app(
                 usage_source=usage_source,
                 request_id=request_id,
             )
+
+        try:
+            provider_name, concrete_model = router.resolve(body.model, client_id)
+        except QuotaExceeded as exc:
+            _metrics("rate_limited")
+            _audit_now(
+                "rate_limited",
+                str(exc),
+                messages=body.model_dump()["messages"],
+            )
+            raise rate_limit_error(str(exc)) from exc
+        except BlockedError as exc:
+            _metrics("blocked")
+            _audit_now(
+                "blocked_source",
+                str(exc),
+                messages=body.model_dump()["messages"],
+            )
+            raise blocked_error(str(exc), reason=exc.reason) from exc
+        payload["model"] = concrete_model
+        provider = app.state.providers.get(provider_name)
+        if provider is None:
+            raise upstream_error(f"routed provider '{provider_name}' not configured")
 
         # Common pre-processing for both streaming and non-streaming
         try:
@@ -570,7 +606,7 @@ def create_app(
         return StreamingResponse(sse(), media_type="text/event-stream")
 
     from fastapi.responses import Response as FastAPIResponse
-    from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
+    from prometheus_client import CONTENT_TYPE_LATEST
 
     @app.get("/metrics")
     async def metrics(request: Request) -> FastAPIResponse:
@@ -578,6 +614,6 @@ def create_app(
             await _require_metrics(request)
         except ApiError as exc:
             return exc.response()
-        return FastAPIResponse(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
+        return FastAPIResponse(content=generate_metrics(), media_type=CONTENT_TYPE_LATEST)
 
     return app

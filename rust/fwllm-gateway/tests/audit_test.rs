@@ -55,6 +55,21 @@ fn search_filters_by_client_and_code() {
 }
 
 #[test]
+fn journal_tuned_for_concurrent_writers() {
+    // 0.1.1 capacity: WAL (multi-process workers) + NORMAL (no fsync stall)
+    // + busy timeout instead of instant SQLITE_BUSY.
+    let dir = tempfile::tempdir().unwrap();
+    let log = AuditLog::open(&config(&dir.path().join("a.db"))).unwrap();
+    log.write("alice", "p", "m", "ok", 1, 2, "[]", "hi", "upstream", "req-1");
+    let conn = rusqlite::Connection::open(dir.path().join("a.db")).unwrap();
+    let mode: String = conn
+        .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(mode.to_lowercase(), "wal");
+    drop(log);
+}
+
+#[test]
 fn usage_source_roundtrip() {
     let dir = tempfile::tempdir().unwrap();
     let log = AuditLog::open(&config(&dir.path().join("a.db"))).unwrap();

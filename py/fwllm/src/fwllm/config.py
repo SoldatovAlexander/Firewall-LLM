@@ -22,6 +22,11 @@ class ServerConfig(BaseModel):
     host: str = "127.0.0.1"
     port: int = 8080
     request_timeout_seconds: float = 120.0
+    # 0.1.1 capacity: max concurrent chat requests per worker process.
+    # Beyond this the server rejects fast with 429 instead of queueing
+    # until timeouts. Router mirrors stay per-worker approximations;
+    # quotas in Redis remain exact.
+    max_inflight_requests: int = 32
 
 
 class ProviderConfig(BaseModel):

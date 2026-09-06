@@ -28,6 +28,25 @@ def test_write_and_search_roundtrip(tmp_path):
     assert rows[0]["response_text"] == "Hi there!"
 
 
+def test_journal_tuned_for_concurrent_writers(tmp_path):
+    """0.1.1 capacity: WAL (multi-process workers) + NORMAL (no fsync stall)
+    + busy timeout instead of instant SQLITE_BUSY."""
+    import sqlite3
+
+    log = AuditLog(AuditConfig(db_path=str(tmp_path / "audit.db")))
+    log.write(**_record())
+    con = sqlite3.connect(str(tmp_path / "audit.db"))
+    try:
+        assert con.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"
+        # synchronous/busy_timeout are per-connection: assert on the log's own
+        # connection, which is the one performing all writes.
+        assert log._conn.execute("PRAGMA synchronous").fetchone()[0] == 1  # noqa: SLF001
+        assert log._conn.execute("PRAGMA busy_timeout").fetchone()[0] == 5000  # noqa: SLF001
+    finally:
+        con.close()
+        log.close()
+
+
 def test_pii_is_redacted_before_storage(tmp_path):
     log = AuditLog(AuditConfig(db_path=str(tmp_path / "audit.db"), dlp_redact=True))
     log.write(

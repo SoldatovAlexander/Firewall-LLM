@@ -2,7 +2,49 @@
 
 from __future__ import annotations
 
-from prometheus_client import Counter, Histogram
+import os
+
+from prometheus_client import (
+    CollectorRegistry,
+    Counter,
+    Histogram,
+    multiprocess,
+    values,
+)
+
+# 0.1.1 capacity: with uvicorn --workers, each worker is its own process.
+# When PROMETHEUS_MULTIPROC_DIR is set, metrics go through per-PID mmap
+# files and /metrics aggregates all workers; otherwise everything stays on
+# the global default registry (tests, single-process dev). The dir must be
+# container-local (fresh on every start) so no stale worker files survive.
+_MULTIPROC = "PROMETHEUS_MULTIPROC_DIR" in os.environ
+if _MULTIPROC:
+    values.ValueClass = values.MultiProcessValue()  # type: ignore[no-untyped-call]
+
+REGISTRY = CollectorRegistry() if _MULTIPROC else None
+if _MULTIPROC:
+    multiprocess.MultiProcessCollector(REGISTRY)  # type: ignore[no-untyped-call]
+
+
+def _counter(name: str, documentation: str, labelnames: list[str] | None = None) -> Counter:
+    if _MULTIPROC:
+        return Counter(name, documentation, labelnames or [], registry=REGISTRY)
+    return Counter(name, documentation, labelnames or [])
+
+
+def _histogram(name: str, documentation: str, labelnames: list[str]) -> Histogram:
+    if _MULTIPROC:
+        return Histogram(name, documentation, labelnames, registry=REGISTRY)
+    return Histogram(name, documentation, labelnames)
+
+
+def generate_metrics() -> bytes:
+    """Render exposition format from the active registry."""
+    from prometheus_client import generate_latest
+
+    if _MULTIPROC and REGISTRY is not None:
+        return generate_latest(REGISTRY)
+    return generate_latest()
 
 REQUESTS = Counter(
     "fw_requests_total",

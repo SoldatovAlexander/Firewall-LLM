@@ -45,6 +45,15 @@ impl AuditLog {
             }
         }
         let conn = rusqlite::Connection::open(&config.db_path)?;
+        // 0.1.1 capacity: WAL allows multi-process workers to share the
+        // audit DB; NORMAL avoids an fsync stall per commit (measured
+        // 5.4ms -> 0.2ms on the release host); busy_timeout turns
+        // SQLITE_BUSY into a wait. Tradeoff, documented: on OS crash the
+        // last uncheckpointed rows may be lost — metering Redis stays the
+        // durable money ledger.
+        conn.execute_batch(
+            "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA busy_timeout=5000;",
+        )?;
         conn.execute(
             "CREATE TABLE IF NOT EXISTS audit (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
