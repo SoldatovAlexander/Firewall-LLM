@@ -23,8 +23,94 @@ use fwllm_core::config::Config;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
+};
 use std::time::Instant;
+
+/// R12: unified per-request lifecycle — exactly one final audit row for
+/// every terminal outcome (JSON/SSE success, block, quota, upstream error,
+/// client cancel), carrying request_id, usage and its source.
+///
+/// Single-shot pre-admission failures (routing/admission) write through
+/// [`audit_once`] directly — each such path runs once by construction.
+/// Post-admission phases share a `RequestLifecycle`: the non-streaming
+/// branch finishes it linearly, the streaming branch from the terminal
+/// chunk, the open-failure branch, or the disconnect `Drop` guard —
+/// whichever runs first wins.
+#[derive(Clone)]
+struct RequestLifecycle {
+    audit: Option<Arc<crate::audit::AuditLog>>,
+    request_id: String,
+    client_id: String,
+    provider_name: String,
+    model: String,
+    messages_json: String,
+    finalized: Arc<AtomicBool>,
+}
+
+impl RequestLifecycle {
+    fn finish(
+        &self,
+        code: &str,
+        prompt_tokens: i64,
+        completion_tokens: i64,
+        response_text: &str,
+        usage_source: &str,
+    ) {
+        if self.finalized.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        audit_once(
+            &self.audit,
+            &self.request_id,
+            &self.client_id,
+            &self.provider_name,
+            &self.model,
+            &self.messages_json,
+            code,
+            prompt_tokens,
+            completion_tokens,
+            response_text,
+            usage_source,
+        );
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn audit_once(
+    audit: &Option<Arc<crate::audit::AuditLog>>,
+    request_id: &str,
+    client_id: &str,
+    provider_name: &str,
+    model: &str,
+    messages_json: &str,
+    code: &str,
+    prompt_tokens: i64,
+    completion_tokens: i64,
+    response_text: &str,
+    usage_source: &str,
+) {
+    if let Some(audit) = audit {
+        audit.write(
+            client_id,
+            provider_name,
+            model,
+            code,
+            prompt_tokens,
+            completion_tokens,
+            messages_json,
+            response_text,
+            usage_source,
+            request_id,
+        );
+    }
+}
+
+fn new_request_id() -> String {
+    format!("{:016x}{:016x}", rand::random::<u64>(), rand::random::<u64>())
+}
 
 /// Build the full application router.
 ///
@@ -272,7 +358,9 @@ fn prompt_text(payload: &Value) -> String {
 /// The terminal `once` records on normal completion; the `Drop` impl covers
 /// client disconnect (axum drops the body stream, so the `once` future may
 /// never run). Both paths share one atomic flag, so usage is never double
-/// counted (coordinates with R05 reserves).
+/// counted (coordinates with R05 reserves). R12 adds the single final audit
+/// row: ok / upstream_error (mid-stream item failure flips the code, it
+/// never stays ok) / cancelled (disconnect before the terminal chunk).
 struct StreamAccountant {
     state: Arc<AppState>,
     client_id: String,
@@ -283,19 +371,15 @@ struct StreamAccountant {
     last_usage: Arc<Mutex<Option<Value>>>,
     recorded: Arc<std::sync::atomic::AtomicBool>,
     reservation: Option<crate::metering::Reservation>,
+    lifecycle: RequestLifecycle,
+    stream_error: Arc<AtomicBool>,
 }
 
 impl StreamAccountant {
-    /// Record metering exactly once; returns the (prompt, completion) pair.
-    fn record_once(&self) -> (u64, u64) {
-        if self
-            .recorded
-            .swap(true, std::sync::atomic::Ordering::SeqCst)
-        {
-            return (0, 0);
-        }
+    /// Record metering exactly once; returns (prompt, completion, source).
+    fn record_once(&self) -> (u64, u64, &'static str) {
         let guard = self.last_usage.lock().unwrap();
-        let (prompt, done) = match guard
+        let (prompt, done, source) = match guard
             .as_ref()
             .and_then(|u| u.as_object())
             .filter(|o| !o.is_empty())
@@ -309,13 +393,18 @@ impl StreamAccountant {
                     .get("completion_tokens")
                     .and_then(|v| v.as_u64())
                     .unwrap_or(0),
+                "upstream",
             ),
             None => {
                 let completion = self.completion_text.lock().unwrap().clone();
-                estimate_usage(&self.request_text, &completion)
+                let (p, d) = estimate_usage(&self.request_text, &completion);
+                (p, d, "estimated")
             }
         };
         drop(guard);
+        if self.recorded.swap(true, Ordering::SeqCst) {
+            return (prompt, done, source);
+        }
         // R05: reconcile the admission reserve; fall back to a plain record
         // when admission was skipped (fail-open without reservation).
         if let Some(metering) = &self.state.metering {
@@ -331,14 +420,24 @@ impl StreamAccountant {
                 );
             }
         }
-        (prompt, done)
+        (prompt, done, source)
     }
 }
 
 impl Drop for StreamAccountant {
     fn drop(&mut self) {
-        // Best-effort accounting on disconnect; a no-op after normal finish.
-        let _ = self.record_once();
+        // R12: disconnect before the terminal chunk — best-effort metering
+        // plus the single final audit row as "cancelled" (or
+        // "upstream_error" when a mid-stream item already failed). A no-op
+        // after normal finish or an already-audited open failure.
+        let (prompt, done, source) = self.record_once();
+        let code = if self.stream_error.load(Ordering::SeqCst) {
+            "upstream_error"
+        } else {
+            "cancelled"
+        };
+        let response_text = self.completion_text.lock().unwrap().clone();
+        self.lifecycle.finish(code, prompt as i64, done as i64, &response_text, source);
     }
 }
 
@@ -377,6 +476,7 @@ async fn stream_response(
     started: Instant,
     chain_state: crate::inspectors::chain::ChainState,
     reservation: Option<crate::metering::Reservation>,
+    lifecycle: RequestLifecycle,
 ) -> Response {
     let client_id = client_id.to_string();
     let provider_name = provider_name.to_string();
@@ -400,10 +500,15 @@ async fn stream_response(
             // R03: restored completion text feeds the estimate fallback.
             let completion_text = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
             let completion_clone = completion_text.clone();
+            // R12: a mid-stream item failure flips the final audit code —
+            // it must never stay "ok".
+            let stream_error = std::sync::Arc::new(AtomicBool::new(false));
+            let stream_error_clone = stream_error.clone();
             let mapped = stream.map(move |item| {
                 let mut chunk = match item {
                     Ok(c) => c,
                     Err(err) => {
+                        stream_error_clone.store(true, Ordering::SeqCst);
                         metrics::observe_request(
                             &client,
                             &provider_tag,
@@ -467,6 +572,8 @@ async fn stream_response(
                 last_usage: last_usage.clone(),
                 recorded: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 reservation: reservation.clone(),
+                lifecycle: lifecycle.clone(),
+                stream_error: stream_error.clone(),
             };
             let with_done = {
                 let restore_done = restore_session.clone();
@@ -497,12 +604,14 @@ async fn stream_response(
                     last_usage: accountant.last_usage.clone(),
                     recorded: accountant.recorded.clone(),
                     reservation: accountant.reservation.clone(),
+                    lifecycle: accountant.lifecycle.clone(),
+                    stream_error: accountant.stream_error.clone(),
                 };
                 tail.chain(futures_util::stream::once(async move {
                     // R03: always count the admitted request, even on zero
                     // usage; Drop covers the disconnect path with the flag.
                     let _guard = accountant_done;
-                    let (prompt, done) = _guard.record_once();
+                    let (prompt, done, source) = _guard.record_once();
                     // R06: feed served usage to routing (normal finish; the
                     // disconnect Drop path updates metering only — router
                     // counters are a best-effort mirror, metering is truth).
@@ -512,11 +621,27 @@ async fn stream_response(
                         .lock()
                         .await
                         .record_tokens_today(&_guard.provider_name, prompt as i64 + done as i64);
+                    // R12: a mid-stream item failure flips the terminal
+                    // code — the final row is never "ok" after an error.
+                    let code = if _guard.stream_error.load(Ordering::SeqCst) {
+                        "upstream_error"
+                    } else {
+                        "ok"
+                    };
+                    let response_text =
+                        _guard.completion_text.lock().unwrap().clone();
+                    _guard.lifecycle.finish(
+                        code,
+                        prompt as i64,
+                        done as i64,
+                        &response_text,
+                        source,
+                    );
                     metrics::observe_request(
                         &_guard.client_id,
                         &_guard.provider_name,
                         &_guard.model,
-                        "ok",
+                        code,
                         started.elapsed().as_secs_f64(),
                         prompt,
                         done,
@@ -535,6 +660,15 @@ async fn stream_response(
                 .unwrap()
         }
         Err(err) => {
+            // R12: stream open failure is audited (not just metered), and
+            // the admission reserve is settled — no stream exists, so no
+            // Drop guard will run for this request.
+            if let Some(metering) = &state.metering {
+                if let Some(rsv) = &reservation {
+                    let (prompt_est, _) = estimate_usage(&request_text, "");
+                    metering.settle(rsv, prompt_est as i64, 0);
+                }
+            }
             metrics::observe_request(
                 &client_id,
                 &provider_name,
@@ -544,12 +678,13 @@ async fn stream_response(
                 0,
                 0,
             );
+            lifecycle.finish("upstream_error", 0, 0, &err.to_string(), "upstream");
             ApiError::upstream(err.to_string()).into_response()
         }
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, serde::Serialize)]
 struct ChatMessage {
     role: String,
     content: Option<String>,
@@ -647,6 +782,11 @@ async fn chat_completions(
         Err(err) => return err.into_response(),
     };
 
+    // R12: every request carries an id through to its single final audit row.
+    let request_id = new_request_id();
+    let unrouted_messages =
+        serde_json::to_string(&serde_json::json!(&body.messages)).unwrap_or_default();
+
     let provider_name;
     let concrete_model;
     {
@@ -666,11 +806,20 @@ async fn chat_completions(
                     0,
                     0,
                 );
+                // R12: routing refusals are audited, not just metered.
+                audit_once(
+                    &state.audit, &request_id, &client_id, "unrouted", &body.model,
+                    &unrouted_messages, "blocked_source", 0, 0, &blocked.message, "upstream",
+                );
                 return ApiError::blocked(blocked.message, "blocked_source")
                     .into_response();
             }
             Err(crate::router::RoutingError::BudgetExhausted(msg)) => {
                 metrics::observe_request(&client_id, "unrouted", &body.model, "rate_limited", 0.0, 0, 0);
+                audit_once(
+                    &state.audit, &request_id, &client_id, "unrouted", &body.model,
+                    &unrouted_messages, "rate_limited", 0, 0, &msg, "upstream",
+                );
                 return ApiError::rate_limited(msg).into_response();
             }
         }
@@ -711,51 +860,6 @@ async fn chat_completions(
     }
 
     let started = Instant::now();
-
-    // R05: atomic admission replaces separate check calls — the request and
-    // its token budget (prompt estimate + completion cap handed to the
-    // adapter) are reserved in one step. 429 on breach, 503 when
-    // fail-closed and the backend is unreachable.
-    let request_text: String = body
-        .messages
-        .iter()
-        .filter_map(|m| m.content.as_deref())
-        .collect::<Vec<_>>()
-        .join("\n");
-    let (prompt_est, _) = estimate_usage(&request_text, "");
-    let reservation: Option<crate::metering::Reservation> =
-        if let Some(metering) = &state.metering {
-            match metering.admit(
-                &client_id,
-                &provider_name,
-                &body.model,
-                prompt_est as i64,
-                body.max_tokens,
-            ) {
-                Ok(rsv) => Some(rsv),
-                Err(crate::metering::MeteringError::QuotaExceeded { scope, limit }) => {
-                    metrics::observe_request(&client_id, &provider_name, &body.model, "rate_limited", 0.0, 0, 0);
-                    return ApiError::rate_limited(format!("daily {scope} quota exceeded (limit={limit})"))
-                        .into_response();
-                }
-                Err(crate::metering::MeteringError::BackendUnavailable(msg)) => {
-                    if metering.backend_fail_closed() {
-                        metrics::observe_request(&client_id, &provider_name, &body.model, "backend_error", 0.0, 0, 0);
-                        return ApiError {
-                            status: axum::http::StatusCode::SERVICE_UNAVAILABLE,
-                            kind: "rate_limit_error",
-                            message: format!("metering backend unavailable: {msg}"),
-                            code: Some("backend_unavailable"),
-                            details: None,
-                        }.into_response();
-                    }
-                    // fail-open: ignore backend errors
-                    None
-                }
-            }
-        } else {
-            None
-        };
 
     let provider = match state.providers.get(&provider_name) {
         Some(p) => p.clone(),
@@ -834,19 +938,88 @@ async fn chat_completions(
         Ok(s) => s,
         Err(e) => {
             metrics::observe_request(&client_id, &provider_name, &body.model, "blocked", 0.0, 0, 0);
-            if let Some(audit) = &state.audit {
-                audit.write(&client_id, &provider_name, &body.model, "blocked", 0, 0, &serde_json::to_string(&payload).unwrap_or_default(), &e.message, "upstream");
-            }
+            audit_once(
+                &state.audit, &request_id, &client_id, &provider_name, &body.model,
+                &serde_json::to_string(&payload).unwrap_or_default(),
+                "blocked", 0, 0, &e.message, "upstream",
+            );
             return e.into_response();
         }
     };
 
+    // R05: atomic admission after inspection (parity with Python) — the
+    // request and its token budget (prompt estimate + completion cap handed
+    // to the adapter) are reserved in one step. 429 on breach, 503 when
+    // fail-closed and the backend is unreachable.
+    let request_text: String = body
+        .messages
+        .iter()
+        .filter_map(|m| m.content.as_deref())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let (prompt_est, _) = estimate_usage(&request_text, "");
+    let masked_messages_json =
+        serde_json::to_string(payload.get("messages").unwrap_or(&Value::Null))
+            .unwrap_or_default();
+    let reservation: Option<crate::metering::Reservation> =
+        if let Some(metering) = &state.metering {
+            match metering.admit(
+                &client_id,
+                &provider_name,
+                &body.model,
+                prompt_est as i64,
+                body.max_tokens,
+            ) {
+                Ok(rsv) => Some(rsv),
+                Err(crate::metering::MeteringError::QuotaExceeded { scope, limit }) => {
+                    metrics::observe_request(&client_id, &provider_name, &body.model, "rate_limited", 0.0, 0, 0);
+                    audit_once(
+                        &state.audit, &request_id, &client_id, &provider_name, &body.model,
+                        &masked_messages_json, "rate_limited", 0, 0,
+                        &format!("daily {scope} quota exceeded (limit={limit})"), "upstream",
+                    );
+                    return ApiError::rate_limited(format!("daily {scope} quota exceeded (limit={limit})"))
+                        .into_response();
+                }
+                Err(crate::metering::MeteringError::BackendUnavailable(msg)) => {
+                    if metering.backend_fail_closed() {
+                        metrics::observe_request(&client_id, &provider_name, &body.model, "backend_error", 0.0, 0, 0);
+                        audit_once(
+                            &state.audit, &request_id, &client_id, &provider_name, &body.model,
+                            &masked_messages_json, "backend_error", 0, 0, &msg, "upstream",
+                        );
+                        return ApiError {
+                            status: axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                            kind: "rate_limit_error",
+                            message: format!("metering backend unavailable: {msg}"),
+                            code: Some("backend_unavailable"),
+                            details: None,
+                        }.into_response();
+                    }
+                    // fail-open: ignore backend errors
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+    // R12: post-admission lifecycle shared by both response branches.
+    let lifecycle = RequestLifecycle {
+        audit: state.audit.clone(),
+        request_id: request_id.clone(),
+        client_id: client_id.clone(),
+        provider_name: provider_name.clone(),
+        model: body.model.clone(),
+        messages_json: masked_messages_json,
+        finalized: Arc::new(AtomicBool::new(false)),
+    };
+
     if body.stream {
-        return stream_response(&state, &client_id, &provider_name, &body.model, provider, payload, started, chain_state, reservation)
+        return stream_response(&state, &client_id, &provider_name, &body.model, provider, payload, started, chain_state, reservation, lifecycle.clone())
             .await;
     }
 
-    let payload_json = serde_json::to_string(&payload).unwrap_or_default();
     let result = provider.chat(payload.take()).await;
     let duration = started.elapsed().as_secs_f64();
 
@@ -917,17 +1090,18 @@ async fn chat_completions(
                 .lock()
                 .await
                 .record_tokens_today(&provider_name, prompt as i64 + done as i64);
-            if let Some(audit) = &state.audit {
-                let response_text = completion["choices"][0]["message"]["content"]
-                    .as_str()
-                    .unwrap_or("")
-                    .to_string();
-                audit.write(
-                    &client_id, &provider_name, &body.model, "ok",
-                    prompt as i64, done as i64, &payload_json, &response_text,
-                    usage_source,
-                );
-            }
+            let response_text = completion["choices"][0]["message"]["content"]
+                .as_str()
+                .unwrap_or("")
+                .to_string();
+            // R12: the single final row for this request.
+            lifecycle.finish(
+                "ok",
+                prompt as i64,
+                done as i64,
+                &response_text,
+                usage_source,
+            );
             (StatusCode::OK, Json(completion)).into_response()
         }
         Err(err) => {
@@ -938,12 +1112,7 @@ async fn chat_completions(
                 }
             }
             metrics::observe_request(&client_id, &provider_name, &body.model, "upstream_error", duration, 0, 0);
-            if let Some(audit) = &state.audit {
-                audit.write(
-                    &client_id, &provider_name, &body.model, "upstream_error",
-                    0, 0, &payload_json, &err.to_string(), "upstream",
-                );
-            }
+            lifecycle.finish("upstream_error", 0, 0, &err.to_string(), "upstream");
             let message = match &err {
                 providers::ProviderError::Http { status, body } => {
                     format!("provider returned {status}: {body}")

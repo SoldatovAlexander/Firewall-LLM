@@ -22,6 +22,19 @@ pub struct AuditRecord {
     #[serde(rename = "response_text")]
     pub response: String,
     pub usage_source: String,
+    pub request_id: String,
+}
+
+/// R12: audit text is stored bounded; longer payloads are truncated with a
+/// marker instead of growing the database without limit.
+pub const MAX_AUDIT_TEXT_CHARS: usize = 8000;
+
+pub fn truncate_audit_text(text: &str) -> String {
+    if text.chars().count() <= MAX_AUDIT_TEXT_CHARS {
+        return text.to_string();
+    }
+    let head: String = text.chars().take(MAX_AUDIT_TEXT_CHARS).collect();
+    format!("{head}…[truncated]")
 }
 
 impl AuditLog {
@@ -44,20 +57,25 @@ impl AuditLog {
                 completion_tokens INTEGER NOT NULL DEFAULT 0,
                 messages TEXT NOT NULL,
                 response_text TEXT NOT NULL,
-                usage_source TEXT NOT NULL DEFAULT 'upstream'
+                usage_source TEXT NOT NULL DEFAULT 'upstream',
+                request_id TEXT NOT NULL DEFAULT ''
             )",
             [],
         )?;
-        // R03: migrate pre-existing databases that lack the column.
-        let has_column: bool = conn
+        // R03/R12: migrate pre-existing databases that lack new columns.
+        let columns: Vec<String> = conn
             .prepare("PRAGMA table_info(audit)")?
-            .query_map([], |row| row.get::<_, String>(1))?
-            .collect::<Result<Vec<_>, _>>()?
-            .iter()
-            .any(|c| c == "usage_source");
-        if !has_column {
+            .query_map([], |row| row.get(1))?
+            .collect::<Result<Vec<_>, _>>()?;
+        if !columns.iter().any(|c| c == "usage_source") {
             conn.execute(
                 "ALTER TABLE audit ADD COLUMN usage_source TEXT NOT NULL DEFAULT 'upstream'",
+                [],
+            )?;
+        }
+        if !columns.iter().any(|c| c == "request_id") {
+            conn.execute(
+                "ALTER TABLE audit ADD COLUMN request_id TEXT NOT NULL DEFAULT ''",
                 [],
             )?;
         }
@@ -103,23 +121,32 @@ impl AuditLog {
         messages_json: &str,
         response_text: &str,
         usage_source: &str,
+        request_id: &str,
     ) {
         if !self.enabled {
             return;
         }
         let ts = iso_now();
-        let messages = self.redact(messages_json);
-        let response = self.redact(response_text);
-        if let Ok(conn) = self.conn.lock() {
-            let _ = conn.execute(
+        // R12: redact, then bound the stored size.
+        let messages = truncate_audit_text(&self.redact(messages_json));
+        let response = truncate_audit_text(&self.redact(response_text));
+        let storage_result = self.conn.lock().map_err(|e| e.to_string()).and_then(|conn| {
+            conn.execute(
                 "INSERT INTO audit (ts, client, provider, model, code,
                     prompt_tokens, completion_tokens, messages, response_text,
-                    usage_source)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                    usage_source, request_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                 rusqlite::params![ts, client, provider, model, code,
                     prompt_tokens, completion_tokens, messages, response,
-                    usage_source],
-            );
+                    usage_source, request_id],
+            )
+            .map_err(|e| e.to_string())
+            .map(|_| ())
+        });
+        // R12: storage failure is a visible metric, not a silent skip.
+        if let Err(e) = storage_result {
+            tracing::warn!("audit write failed: {e}");
+            crate::metrics::audit_error();
         }
     }
 
@@ -131,7 +158,8 @@ impl AuditLog {
     ) -> Vec<AuditRecord> {
         let query = format!(
             "SELECT ts, client, provider, model, code, prompt_tokens,
-                    completion_tokens, messages, response_text, usage_source
+                    completion_tokens, messages, response_text, usage_source,
+                    request_id
              FROM audit{} ORDER BY id DESC LIMIT {}",
             match (client.is_some(), code.is_some()) {
                 (true, true) => " WHERE client = ?1 AND code = ?2",
@@ -158,6 +186,7 @@ impl AuditLog {
                 messages: row.get(7)?,
                 response: row.get(8)?,
                 usage_source: row.get(9).unwrap_or_else(|_| "upstream".to_string()),
+                request_id: row.get::<_, String>(10).unwrap_or_default(),
             })
         };
         let rows = match (client, code) {

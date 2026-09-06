@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
+import uuid
 from collections.abc import AsyncIterator, Awaitable
 from typing import Annotated, Any, TypeVar
 
@@ -25,7 +27,7 @@ from fwllm.errors import (
 )
 from fwllm.inspectors.chain import InspectorChain
 from fwllm.metering import Metering, QuotaExceeded, Reservation, estimate_usage
-from fwllm.observability.metrics import observe_request
+from fwllm.observability.metrics import observe_audit_error, observe_request
 from fwllm.providers.base import BlockedError, Provider, ProviderError
 from fwllm.router.policy import PolicyEngine
 
@@ -209,6 +211,7 @@ def create_app(
         prompt_tokens: int = 0,
         completion_tokens: int = 0,
         usage_source: str = "upstream",
+        request_id: str = "",
     ) -> None:
         if not audit_log.enabled:
             return
@@ -221,11 +224,18 @@ def create_app(
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
                 usage_source=usage_source,
+                request_id=request_id,
                 messages=messages,
                 response_text=response_text,
             )
         except Exception:  # noqa: BLE001
+            # R12: storage failure is a visible metric, not a silent skip.
             logger.warning("audit write failed", exc_info=True)
+            try:
+                observe_audit_error()
+            except Exception:  # noqa: BLE001, S110
+                # metrics backend itself is down; the warning above stands
+                logger.debug("audit error metric failed", exc_info=True)
 
     async def validation_handler(_request: Request, exc: RequestValidationError) -> Any:
         return await validation_error_handler(_request, exc)
@@ -308,6 +318,9 @@ def create_app(
         if provider is None:
             raise upstream_error(f"routed provider '{provider_name}' not configured")
 
+        # R12: every request carries an id through to its single final row.
+        request_id = uuid.uuid4().hex
+
         def _audit_now(
             code: str,
             response_text: str,
@@ -326,6 +339,7 @@ def create_app(
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
                 usage_source=usage_source,
+                request_id=request_id,
             )
 
         # Common pre-processing for both streaming and non-streaming
@@ -481,6 +495,16 @@ def create_app(
                         "choices": [{"index": 0, "delta": {"content": flushed}}],
                     }
                     yield f"data: {json.dumps(tail, separators=(',', ':'))}\n\n"
+            except GeneratorExit:
+                # R12: client disconnect mid-stream — the finally below still
+                # runs, but the final row must read cancelled, never ok.
+                code = "cancelled"
+                return
+            except asyncio.CancelledError:
+                # Servers (uvicorn) cancel the task on disconnect instead of
+                # aclosing the iterator: same outcome, must re-raise.
+                code = "cancelled"
+                raise
             except BlockedError as exc:
                 code = "blocked"
                 err = blocked_error(str(exc), reason=exc.reason)

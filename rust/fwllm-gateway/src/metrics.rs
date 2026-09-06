@@ -9,6 +9,7 @@ struct Metrics {
     requests: IntCounterVec,
     tokens: IntCounterVec,
     duration: HistogramVec,
+    audit_errors: prometheus::IntCounter,
 }
 
 static METRICS: OnceLock<Metrics> = OnceLock::new();
@@ -33,7 +34,18 @@ fn metrics() -> &'static Metrics {
             &["provider", "model"]
         )
         .unwrap(),
+        audit_errors: prometheus::register_int_counter!(
+            "fw_audit_errors_total",
+            "Audit storage write failures"
+        )
+        .unwrap(),
     })
+}
+
+/// R12: audit storage failure is a visible metric with a consistent policy
+/// (log + count; the request itself is unaffected).
+pub fn audit_error() {
+    metrics().audit_errors.inc();
 }
 
 #[allow(clippy::too_many_arguments)]

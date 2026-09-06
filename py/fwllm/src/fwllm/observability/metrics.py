@@ -22,6 +22,17 @@ DURATION = Histogram(
     ["provider", "model"],
 )
 
+# R12: audit storage write failures are visible; the request itself is
+# unaffected (log + count policy).
+AUDIT_ERRORS = Counter(
+    "fw_audit_errors_total",
+    "Audit storage write failures",
+)
+
+
+def observe_audit_error() -> None:
+    AUDIT_ERRORS.inc()
+
 
 def observe_request(
     *,

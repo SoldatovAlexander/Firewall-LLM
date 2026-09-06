@@ -15,7 +15,7 @@ fn config(path: &std::path::Path) -> AuditConfig {
 fn write_and_search_roundtrip() {
     let dir = tempfile::tempdir().unwrap();
     let log = AuditLog::open(&config(&dir.path().join("a.db"))).unwrap();
-    log.write("alice", "primary", "gpt-4o", "ok", 10, 5, r#"[{"role":"user"}]"#, "Hi!", "upstream");
+    log.write("alice", "primary", "gpt-4o", "ok", 10, 5, r#"[{"role":"user"}]"#, "Hi!", "upstream", "req-1");
     let rows = log.search(None, None, 100);
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].client, "alice");
@@ -32,6 +32,7 @@ fn pii_is_redacted_before_storage() {
         r#"[{"role":"user","content":"email ivan@mail.ru please"}]"#,
         "contact +7 999 123-45-67 later",
         "upstream",
+        "req-2",
     );
     let row = &log.search(None, None, 10)[0];
     assert!(!row.messages.contains("ivan@mail.ru"), "{}", row.messages);
@@ -44,8 +45,8 @@ fn pii_is_redacted_before_storage() {
 fn search_filters_by_client_and_code() {
     let dir = tempfile::tempdir().unwrap();
     let log = AuditLog::open(&config(&dir.path().join("a.db"))).unwrap();
-    log.write("alice", "p", "m", "ok", 1, 1, "[]", "", "upstream");
-    log.write("bob", "p", "m", "blocked", 0, 0, "[]", "", "upstream");
+    log.write("alice", "p", "m", "ok", 1, 1, "[]", "", "upstream", "req-3");
+    log.write("bob", "p", "m", "blocked", 0, 0, "[]", "", "upstream", "req-3");
     assert_eq!(log.search(Some("bob"), None, 100).len(), 1);
     assert_eq!(log.search(None, Some("blocked"), 100)[0].client, "bob");
     assert_eq!(
@@ -57,7 +58,7 @@ fn search_filters_by_client_and_code() {
 fn usage_source_roundtrip() {
     let dir = tempfile::tempdir().unwrap();
     let log = AuditLog::open(&config(&dir.path().join("a.db"))).unwrap();
-    log.write("alice", "p", "m", "ok", 1, 2, "[]", "hi", "estimated");
+    log.write("alice", "p", "m", "ok", 1, 2, "[]", "hi", "estimated", "req-4");
     let row = &log.search(None, None, 10)[0];
     assert_eq!(row.usage_source, "estimated");
 }
@@ -68,6 +69,6 @@ fn disabled_audit_writes_nothing() {
     let mut cfg = config(&dir.path().join("a.db"));
     cfg.enabled = false;
     let log = AuditLog::open(&cfg).unwrap();
-    log.write("alice", "p", "m", "ok", 1, 1, "[]", "", "upstream");
+    log.write("alice", "p", "m", "ok", 1, 1, "[]", "", "upstream", "req-3");
     assert_eq!(log.search(None, None, 100).len(), 0);
 }

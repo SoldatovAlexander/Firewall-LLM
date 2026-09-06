@@ -167,24 +167,78 @@ async def test_stream_requests_include_usage_upstream():
 
 
 async def test_stream_disconnect_still_records_request():
-    """R03: client abort mid-stream must not lose the accounting."""
-    client, redis, _events, _provider = _stream_app(Quotas(), NoUsageStreamProvider())
-    day = _today()
-    with client:
-        with client.stream(
-            "POST",
-            "/v1/chat/completions",
-            json=_body(stream=True),
-            headers=_headers(),
-        ) as r:
-            assert r.status_code == 200
-            first = next(r.iter_text())
-            assert first.startswith("data: ")
-            # abort: exit without consuming the stream
-        import gc
+    """R03: client abort mid-stream must not lose the accounting.
 
-        gc.collect()
-        assert int(await redis.get(f"fwllm:c:req:alice:{day}") or 0) == 1
+    Drives raw ASGI so http.disconnect genuinely cancels the stream
+    (TestClient/httpx-ASGI would let the producer finish first).
+    """
+    import asyncio
+    import json as jsonlib
+    from collections.abc import AsyncIterator
+
+    release = asyncio.Event()
+
+    class BlockingNoUsageProvider(NoUsageStreamProvider):
+        async def chat_stream(
+            self, payload: dict[str, Any]
+        ) -> AsyncIterator[dict[str, Any]]:
+            async for chunk in super().chat_stream(payload):
+                yield chunk
+                # stay suspended mid-stream until the disconnect lands
+                await release.wait()
+                return
+
+    quotas = Quotas()
+    redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
+    cfg = Config(
+        server=ServerConfig(),
+        providers={"mock": ProviderConfig(base_url="http://mock.local/v1")},
+        clients={CLIENT_KEY: "alice"},
+        quotas=quotas,
+    )
+    metering = Metering(redis, quotas=quotas.model_dump(exclude_none=True))
+    app = create_app(cfg, providers={"mock": BlockingNoUsageProvider()}, metering=metering)
+
+    request_body = jsonlib.dumps(_body(stream=True)).encode()
+    body_sent = False
+    first_chunk_seen = asyncio.Event()
+    status_code: list[int] = []
+
+    async def receive() -> dict[str, Any]:
+        nonlocal body_sent
+        if not body_sent:
+            body_sent = True
+            return {"type": "http.request", "body": request_body, "more_body": False}
+        await first_chunk_seen.wait()
+        return {"type": "http.disconnect"}
+
+    async def send(message: dict[str, Any]) -> None:
+        if message["type"] == "http.response.start":
+            status_code.append(message["status"])
+        elif message["type"] == "http.response.body" and message.get("body"):
+            first_chunk_seen.set()
+
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": "/v1/chat/completions",
+        "raw_path": b"/v1/chat/completions",
+        "query_string": b"",
+        "headers": [
+            (b"authorization", _headers()["Authorization"].encode()),
+            (b"content-type", b"application/json"),
+        ],
+        "server": ("test", 80),
+        "client": ("test", 5000),
+    }
+    await asyncio.wait_for(app(scope, receive, send), timeout=15)
+    assert status_code == [200]
+    release.set()
+    day = _today()
+    assert int(await redis.get(f"fwllm:c:req:alice:{day}") or 0) == 1
 
 
 async def test_concurrent_requests_single_upstream_call():
