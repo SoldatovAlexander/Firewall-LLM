@@ -293,23 +293,25 @@ async fn stream_response(
                 if chunk.get("usage").is_some() {
                     *last_usage_clone.lock().unwrap() = chunk.get("usage").cloned();
                 }
-                if let Some(delta) = chunk
+                // R04: restore every choice by index, never assume choices[0].
+                if let Some(choices) = chunk
                     .get_mut("choices")
-                    .and_then(|c| c.get_mut(0))
-                    .and_then(|c| c.get_mut("delta"))
-                    .and_then(|d| d.get_mut("content"))
-                    .and_then(|c| c.as_str())
-                    .map(|s| s.to_string())
+                    .and_then(|c| c.as_array_mut())
                 {
-                    let restored = state_clone
-                        .inspectors
-                        .process_response(&delta, &chain_state_clone);
-                    if let Some(d) = chunk
-                        .get_mut("choices")
-                        .and_then(|c| c.get_mut(0))
-                        .and_then(|c| c.get_mut("delta"))
-                    {
-                        d["content"] = json!(restored);
+                    for choice in choices.iter_mut() {
+                        let delta = choice
+                            .get_mut("delta")
+                            .and_then(|d| d.get_mut("content"))
+                            .and_then(|c| c.as_str())
+                            .map(|s| s.to_string());
+                        if let Some(delta) = delta {
+                            let restored = state_clone
+                                .inspectors
+                                .process_response(&delta, &chain_state_clone);
+                            if let Some(d) = choice.get_mut("delta") {
+                                d["content"] = json!(restored);
+                            }
+                        }
                     }
                 }
                 Ok::<Bytes, std::convert::Infallible>(Bytes::from(format!(

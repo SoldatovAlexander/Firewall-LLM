@@ -217,6 +217,52 @@ def test_streaming_sse_chunks_and_done():
     assert "".join(ch["choices"][0]["delta"].get("content", "") for ch in chunks) == "Hello!"
 
 
+def test_stream_usage_chunk_with_empty_choices_completes():
+    """R04: usage-only chunk (choices=[]) must not crash the stream."""
+
+    class UsageStreamProvider(FakeProvider):
+        async def chat_stream(
+            self, payload: dict[str, Any]
+        ) -> AsyncIterator[dict[str, Any]]:
+            yield {"choices": [{"delta": {"content": "Hi"}}]}
+            yield {"choices": [{"delta": {}, "finish_reason": "stop"}]}
+            yield {
+                "choices": [],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+            }
+
+    with _client(UsageStreamProvider()) as c:
+        with c.stream(
+            "POST",
+            "/v1/chat/completions",
+            json=_body(stream=True),
+            headers=_headers(),
+        ) as r:
+            assert r.status_code == 200
+            text = "".join(chunk for chunk in r.iter_text())
+    assert text.rstrip().endswith("data: [DONE]")
+
+
+def test_stream_missing_and_null_choices_completes():
+    class OddStreamProvider(FakeProvider):
+        async def chat_stream(
+            self, payload: dict[str, Any]
+        ) -> AsyncIterator[dict[str, Any]]:
+            yield {"no_choices_here": True}
+            yield {"choices": None}
+
+    with _client(OddStreamProvider()) as c:
+        with c.stream(
+            "POST",
+            "/v1/chat/completions",
+            json=_body(stream=True),
+            headers=_headers(),
+        ) as r:
+            assert r.status_code == 200
+            text = "".join(chunk for chunk in r.iter_text())
+    assert text.rstrip().endswith("data: [DONE]")
+
+
 def test_stream_upstream_failure_emits_error_event():
     class FailingStreamProvider(FakeProvider):
         async def chat_stream(self, payload: dict[str, Any]) -> AsyncIterator[dict[str, Any]]:

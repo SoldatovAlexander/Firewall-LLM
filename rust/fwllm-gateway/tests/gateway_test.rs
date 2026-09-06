@@ -333,6 +333,59 @@ async fn streaming_sse_chunks_and_done() {
 }
 
 #[tokio::test]
+async fn stream_usage_only_and_multi_choice_chunks() {
+    struct OddStreamFake;
+
+    impl Provider for OddStreamFake {
+        fn chat(&self, _p: Value) -> ChatFuture {
+            unreachable!()
+        }
+        fn chat_stream(&self, _p: Value) -> StreamFuture {
+            use futures_util::stream;
+            Box::pin(async move {
+                let items: Vec<Result<Value, ProviderError>> = vec![
+                    Ok(json!({"choices": [
+                        {"delta": {"content": "A"}},
+                        {"delta": {"content": "B"}},
+                    ]})),
+                    Ok(json!({"choices": [], "usage": {"prompt_tokens": 1, "completion_tokens": 1}})),
+                    Ok(json!({"no_choices": true})),
+                ];
+                Ok(Box::pin(stream::iter(items))
+                    as Pin<Box<dyn Stream<Item = Result<Value, ProviderError>> + Send>>)
+            })
+        }
+    }
+
+    let cfg = base_config(None);
+    let mut providers: HashMap<String, Arc<dyn Provider>> = HashMap::new();
+    providers.insert("primary".into(), Arc::new(OddStreamFake));
+    providers.insert("backup".into(), Arc::new(OddStreamFake));
+
+    let res = fwllm_gateway::build_app(cfg, Some(Arc::new(providers)))
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header(auth_header().0, auth_header().1)
+                .body(Body::from(
+                    r#"{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}],"stream":true}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(res.status(), 200);
+    let bytes = res.into_body().collect().await.unwrap().to_bytes();
+    let text = String::from_utf8(bytes.to_vec()).unwrap();
+    assert!(text.ends_with("data: [DONE]\n\n"));
+    assert!(text.contains("\"content\":\"A\""));
+    assert!(text.contains("\"content\":\"B\""));
+}
+
+#[tokio::test]
 async fn stream_open_failure_maps_to_502() {
     struct FailingStream;
 

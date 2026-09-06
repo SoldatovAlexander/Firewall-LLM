@@ -383,15 +383,25 @@ def create_app(
             last_usage: dict[str, Any] | None = None
             try:
                 async for chunk in provider.chat_stream(payload):
-                    # Capture usage if present (OpenAI stream_options include_usage)
-                    if isinstance(chunk, dict) and chunk.get("usage"):
-                        last_usage = chunk["usage"]
-                    delta = (
-                        chunk.get("choices", [{}])[0].get("delta", {}).get("content")
-                        if isinstance(chunk, dict)
-                        else None
-                    )
-                    if isinstance(delta, str) and delta:
+                    if not isinstance(chunk, dict):
+                        continue
+                    # R04: usage is extracted independently of choices, so a
+                    # usage-only chunk (choices=[]) cannot crash the stream.
+                    usage = chunk.get("usage")
+                    if isinstance(usage, dict) and usage:
+                        last_usage = usage
+                    choices = chunk.get("choices") or []
+                    if not isinstance(choices, list):
+                        choices = []
+                    for choice in choices:
+                        if not isinstance(choice, dict):
+                            continue
+                        delta_obj = choice.get("delta")
+                        if not isinstance(delta_obj, dict):
+                            continue
+                        delta = delta_obj.get("content")
+                        if not isinstance(delta, str) or not delta:
+                            continue
                         # Apply streaming DLP restore if available (sliding window handled inside)
                         try:
                             # Find DLP inspector state for streaming
@@ -400,7 +410,7 @@ def create_app(
                             ):
                                 if hasattr(inspector, "restore_stream_text"):
                                     delta = inspector.restore_stream_text(delta, part)
-                            chunk["choices"][0]["delta"]["content"] = delta
+                            delta_obj["content"] = delta
                         except Exception:
                             logger.debug("streaming DLP restore failed", exc_info=True)
                         response_parts.append(delta)
