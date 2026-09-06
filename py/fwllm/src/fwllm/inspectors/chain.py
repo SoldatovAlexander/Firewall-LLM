@@ -15,6 +15,16 @@ from fwllm.metering import Event
 logger = logging.getLogger(__name__)
 
 
+class _PassthroughRestore:
+    """Stateless no-op restore used when DLP streaming is unavailable."""
+
+    def feed(self, text: str) -> str:
+        return text
+
+    def flush(self) -> str:
+        return ""
+
+
 @dataclass
 class InspectionContext:
     """Carries per-request inspection state through to the response phase."""
@@ -92,6 +102,18 @@ class InspectorChain:
             except TypeError:
                 parts.append(inspector.process_request(payload))
         return InspectionContext(parts=parts)
+
+    def stream_restore_session(self, ctx: InspectionContext) -> Any:
+        """Stateful per-response restore for streaming (R13).
+
+        Delegates to the DLP inspector's stream_session; falls back to a
+        stateless shim when no streaming-aware inspector is configured.
+        """
+        for inspector, part in zip(self._inspectors, ctx.parts, strict=False):
+            factory = getattr(inspector, "stream_session", None)
+            if callable(factory):
+                return factory(part)
+        return _PassthroughRestore()
 
     def process_response(self, result: Any, ctx: InspectionContext) -> Any:
         if isinstance(result, str):

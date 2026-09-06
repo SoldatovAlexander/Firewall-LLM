@@ -19,9 +19,20 @@ fn sigs() -> &'static [Sig] {
 pub fn scan(messages: &[serde_json::Value]) -> Vec<(&'static str, &'static str)> {
     let mut findings = Vec::new();
     for m in messages {
+        // R07: inspect content plus serialized tool_calls/name text.
+        let mut texts: Vec<String> = Vec::new();
         if let Some(content) = m.get("content").and_then(|v| v.as_str()) {
+            texts.push(content.to_string());
+        }
+        if let Some(tool_calls) = m.get("tool_calls") {
+            texts.push(tool_calls.to_string());
+        }
+        if let Some(name) = m.get("name").and_then(|v| v.as_str()) {
+            texts.push(name.to_string());
+        }
+        for text in &texts {
             for sig in sigs() {
-                if sig.re.is_match(content) {
+                if sig.re.is_match(text) {
                     findings.push((sig.name, sig.severity));
                 }
             }

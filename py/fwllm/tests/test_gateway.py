@@ -263,6 +263,60 @@ def test_stream_missing_and_null_choices_completes():
     assert text.rstrip().endswith("data: [DONE]")
 
 
+def test_contract_params_forwarded_upstream():
+    """R07: stop/tool_calls/name reach the provider; metadata stays client-side."""
+    provider = FakeProvider()
+    body = {
+        "model": "gpt-4o",
+        "messages": [
+            {
+                "role": "user",
+                "content": "hi",
+                "name": "bob",
+                "tool_calls": [{"id": "1", "function": {"name": "get_time", "arguments": "{}"}}],
+            }
+        ],
+        "temperature": 0.5,
+        "top_p": 0.9,
+        "max_tokens": 100,
+        "stop": ["END"],
+        "metadata": {"project": "x"},
+    }
+    with _client(provider) as c:
+        r = c.post("/v1/chat/completions", json=body, headers=_headers())
+        assert r.status_code == 200
+    sent = provider.calls[0]
+    assert sent["temperature"] == 0.5
+    assert sent["top_p"] == 0.9
+    assert sent["max_tokens"] == 100
+    assert sent["stop"] == ["END"]
+    assert sent["messages"][0]["name"] == "bob"
+    assert sent["messages"][0]["tool_calls"][0]["function"]["name"] == "get_time"
+    assert "metadata" not in sent
+
+
+def test_contract_ranges_rejected_with_422():
+    for field, value in [
+        ("temperature", 5.0),
+        ("temperature", -0.1),
+        ("top_p", 1.5),
+        ("max_tokens", 0),
+    ]:
+        body = _body()
+        body[field] = value
+        with _client(FakeProvider()) as c:
+            r = c.post("/v1/chat/completions", json=body, headers=_headers())
+            assert r.status_code == 422, field
+            assert r.json()["error"]["type"] == "invalid_request_error"
+
+
+def test_contract_empty_messages_rejected():
+    body = _body(messages=[])
+    with _client(FakeProvider()) as c:
+        r = c.post("/v1/chat/completions", json=body, headers=_headers())
+        assert r.status_code == 422
+
+
 def test_stream_upstream_failure_emits_error_event():
     class FailingStreamProvider(FakeProvider):
         async def chat_stream(self, payload: dict[str, Any]) -> AsyncIterator[dict[str, Any]]:

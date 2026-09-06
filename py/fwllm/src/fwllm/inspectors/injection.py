@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import threading
@@ -105,12 +106,21 @@ class InjectionInspector:
     def _scan(self, messages: list[dict[str, Any]]) -> list[tuple[str, str]]:
         findings: list[tuple[str, str]] = []
         for message in messages:
+            # R07: inspect content plus serialized tool_calls/name text.
+            texts = []
             content = message.get("content")
-            if not isinstance(content, str):
-                continue
-            for name, severity, pattern in SIGNATURES:
-                if pattern.search(content):
-                    findings.append((name, severity))
+            if isinstance(content, str):
+                texts.append(content)
+            tool_calls = message.get("tool_calls")
+            if tool_calls is not None:
+                texts.append(json.dumps(tool_calls))
+            name = message.get("name")
+            if isinstance(name, str):
+                texts.append(name)
+            for text in texts:
+                for sig_name, severity, pattern in SIGNATURES:
+                    if pattern.search(text):
+                        findings.append((sig_name, severity))
         return findings
 
     def process_response(self, text: str, part: None) -> str:

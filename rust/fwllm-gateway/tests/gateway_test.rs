@@ -386,6 +386,80 @@ async fn stream_usage_only_and_multi_choice_chunks() {
 }
 
 #[tokio::test]
+async fn contract_params_forwarded_upstream() {
+    use std::sync::Mutex;
+
+    let fake = Arc::new(FakeProvider { fail: false, calls: Mutex::new(vec![]) });
+    let cfg = base_config(None);
+    let mut providers: HashMap<String, Arc<dyn Provider>> = HashMap::new();
+    providers.insert("primary".into(), fake.clone());
+    providers.insert("backup".into(), fake.clone());
+
+    let body = json!({
+        "model": "gpt-4o",
+        "messages": [{
+            "role": "user",
+            "content": "hi",
+            "name": "bob",
+            "tool_calls": [{"id": "1", "function": {"name": "get_time", "arguments": "{}"}}],
+        }],
+        "temperature": 0.5,
+        "top_p": 0.9,
+        "max_tokens": 100,
+        "stop": ["END"],
+        "metadata": {"project": "x"},
+    });
+    let res = fwllm_gateway::build_app(cfg, Some(Arc::new(providers)))
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header(auth_header().0, auth_header().1)
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 200);
+    let sent = fake.calls.lock().unwrap()[0].clone();
+    assert_eq!(sent["temperature"], 0.5);
+    assert_eq!(sent["top_p"], 0.9);
+    assert_eq!(sent["max_tokens"], 100);
+    assert_eq!(sent["stop"], json!(["END"]));
+    assert_eq!(sent["messages"][0]["name"], "bob");
+    assert_eq!(sent["messages"][0]["tool_calls"][0]["function"]["name"], "get_time");
+    assert!(sent.get("metadata").is_none());
+}
+
+#[tokio::test]
+async fn contract_ranges_rejected_with_422() {
+    for (field, value) in [
+        ("temperature", json!(5.0)),
+        ("temperature", json!(-0.1)),
+        ("top_p", json!(1.5)),
+        ("max_tokens", json!(0)),
+    ] {
+        let mut body =
+            json!({"model": "gpt-4o", "messages": [{"role": "user", "content": "hi"}]});
+        body[field] = value;
+        let res = app_with(false)
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header("content-type", "application/json")
+                    .header(auth_header().0, auth_header().1)
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 422, "{field}");
+    }
+}
+
+#[tokio::test]
 async fn stream_open_failure_maps_to_502() {
     struct FailingStream;
 

@@ -14,6 +14,28 @@ fn injection_high_severity_blocks() {
 }
 
 #[test]
+fn stream_restore_reassembles_split_tokens() {
+    let cfg = InspectorsConfig {
+        dlp: DlpConfig { mode: "mask".into(), restore_policy: "restore".into(), profile: "ru_152".into() },
+        injection: InjectionConfig { mode: "off".into(), ..Default::default() },
+    };
+    let chain = InspectorChain::from_config(&cfg).unwrap();
+    let mut payload = serde_json::json!({"messages": [{"role": "user", "content": "email ivan@mail.ru please"}]});
+    let state = chain.process_request(&mut payload).unwrap();
+    let masked = payload["messages"][0]["content"].as_str().unwrap().to_string();
+    let token_start = masked.find("[EMAIL").unwrap();
+    let token_end = masked.find(']').unwrap() + 1;
+    let token = masked[token_start..token_end].to_string();
+
+    let mut session = chain.stream_restore_session(&state);
+    let head = session.feed(&format!("call {}", &token[..token.len() / 2]));
+    assert!(!head.contains(&token[..token.len() / 2]));
+    let tail = session.feed(&format!("{} now", &token[token.len() / 2..]));
+    assert!((head.clone() + &tail).contains("ivan@mail.ru"));
+    assert_eq!(session.flush(), "");
+}
+
+#[test]
 fn dlp_masks_pii() {
     let cfg = InspectorsConfig {
         dlp: DlpConfig { mode: "mask".into(), restore_policy: "mask".into(), profile: "ru_152".into() },

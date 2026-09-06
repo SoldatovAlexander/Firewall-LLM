@@ -267,8 +267,12 @@ async fn stream_response(
             let client = client_id.clone();
             let provider_tag = provider_name.clone();
             let model_tag = model.clone();
-            let state_clone = state.clone();
-            let chain_state_clone = chain_state.clone();
+            // R13: stateful restore session reassembles DLP tokens split
+            // across SSE chunk boundaries.
+            let restore_session = std::sync::Arc::new(std::sync::Mutex::new(
+                state.inspectors.stream_restore_session(&chain_state),
+            ));
+            let restore_clone = restore_session.clone();
             let last_usage = std::sync::Arc::new(std::sync::Mutex::new(None::<Value>));
             let last_usage_clone = last_usage.clone();
             let mapped = stream.map(move |item| {
@@ -305,9 +309,8 @@ async fn stream_response(
                             .and_then(|c| c.as_str())
                             .map(|s| s.to_string());
                         if let Some(delta) = delta {
-                            let restored = state_clone
-                                .inspectors
-                                .process_response(&delta, &chain_state_clone);
+                            let restored =
+                                restore_clone.lock().unwrap().feed(&delta);
                             if let Some(d) = choice.get_mut("delta") {
                                 d["content"] = json!(restored);
                             }
@@ -325,7 +328,23 @@ async fn stream_response(
                 let client_id = client_id.clone();
                 let provider_name = provider_name.clone();
                 let model = model.clone();
-                mapped.chain(futures_util::stream::once(async move {
+                let restore_done = restore_session.clone();
+                // Flush held-back trailing text (R13) ahead of [DONE].
+                let tail = mapped.chain(futures_util::stream::once(async move {
+                    let flushed = restore_done.lock().unwrap().flush();
+                    if flushed.is_empty() {
+                        None
+                    } else {
+                        Some(Ok::<Bytes, std::convert::Infallible>(Bytes::from(format!(
+                            "data: {}\n\n",
+                            json!({
+                                "object": "chat.completion.chunk",
+                                "choices": [{"index": 0, "delta": {"content": flushed}}],
+                            })
+                        ))))
+                    }
+                }).filter_map(|x| async move { x }));
+                tail.chain(futures_util::stream::once(async move {
                     let guard = last_usage.lock().unwrap();
                     let prompt = guard
                         .as_ref()
@@ -378,9 +397,12 @@ async fn stream_response(
 
 #[derive(Debug, Deserialize)]
 struct ChatMessage {
-    #[allow(dead_code)]
     role: String,
     content: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    tool_calls: Option<Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -389,6 +411,18 @@ struct ChatCompletionRequest {
     messages: Vec<ChatMessage>,
     #[serde(default)]
     stream: bool,
+    #[serde(default)]
+    temperature: Option<f64>,
+    #[serde(default)]
+    top_p: Option<f64>,
+    #[serde(default)]
+    max_tokens: Option<i64>,
+    #[serde(default)]
+    stop: Option<Value>,
+    // Client-side per contract; accepted but never forwarded upstream.
+    #[serde(default)]
+    #[allow(dead_code)]
+    metadata: Option<Value>,
 }
 
 async fn require_client(
@@ -485,6 +519,40 @@ async fn chat_completions(
         }
     }
 
+    // R07: contract validation — ranges per openapi.yaml, messages min 1.
+    if body.messages.is_empty() {
+        return ApiError::invalid_request("messages must contain at least 1 item")
+            .into_response();
+    }
+    if let Some(t) = body.temperature {
+        if !(0.0..=2.0).contains(&t) {
+            return ApiError::invalid_request("temperature must be within 0..2")
+                .into_response();
+        }
+    }
+    if let Some(p) = body.top_p {
+        if !(0.0..=1.0).contains(&p) {
+            return ApiError::invalid_request("top_p must be within 0..1")
+                .into_response();
+        }
+    }
+    if let Some(m) = body.max_tokens {
+        if m < 1 {
+            return ApiError::invalid_request("max_tokens must be >= 1").into_response();
+        }
+    }
+    if let Some(stop) = &body.stop {
+        let ok = stop.is_string()
+            || stop
+                .as_array()
+                .map(|a| a.iter().all(|v| v.is_string()))
+                .unwrap_or(false);
+        if !ok {
+            return ApiError::invalid_request("stop must be a string or array of strings")
+                .into_response();
+        }
+    }
+
     let started = Instant::now();
 
     // quota gate -> 429, or 503 when fail-closed and backend unreachable
@@ -551,14 +619,39 @@ async fn chat_completions(
         }
     };
 
-    // Common payload construction and inspection for both streaming and non-streaming
+    // Common payload construction and inspection for both streaming and non-streaming.
+    // Contract fields (temperature/top_p/max_tokens/stop/name/tool_calls) are
+    // forwarded; metadata stays client-side and is never sent upstream.
     let mut payload = json!({
         "model": concrete_model,
         "messages": body.messages.iter()
-            .map(|m| json!({"role": m.role, "content": m.content}))
+            .map(|m| {
+                let mut msg = serde_json::Map::new();
+                msg.insert("role".to_string(), json!(m.role));
+                msg.insert("content".to_string(), json!(m.content));
+                if let Some(name) = &m.name {
+                    msg.insert("name".to_string(), json!(name));
+                }
+                if let Some(tool_calls) = &m.tool_calls {
+                    msg.insert("tool_calls".to_string(), tool_calls.clone());
+                }
+                Value::Object(msg)
+            })
             .collect::<Vec<_>>(),
         "stream": body.stream,
     });
+    if let Some(t) = body.temperature {
+        payload["temperature"] = json!(t);
+    }
+    if let Some(p) = body.top_p {
+        payload["top_p"] = json!(p);
+    }
+    if let Some(m) = body.max_tokens {
+        payload["max_tokens"] = json!(m);
+    }
+    if let Some(stop) = &body.stop {
+        payload["stop"] = stop.clone();
+    }
 
     let chain_state = match state
         .inspectors

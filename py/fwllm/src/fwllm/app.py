@@ -48,15 +48,20 @@ async def _metering_safe(op: Awaitable[T]) -> T | None:
 class ChatMessage(BaseModel):
     role: str
     content: str | None = None
+    name: str | None = None
+    tool_calls: list[dict[str, Any]] | None = None
 
 
 class ChatCompletionRequest(BaseModel):
     model: str
     messages: list[ChatMessage] = Field(min_length=1)
     stream: bool = False
-    temperature: float | None = None
-    top_p: float | None = None
-    max_tokens: int | None = None
+    temperature: float | None = Field(default=None, ge=0, le=2)
+    top_p: float | None = Field(default=None, ge=0, le=1)
+    max_tokens: int | None = Field(default=None, ge=1)
+    stop: str | list[str] | None = None
+    # Client-side per contract; accepted but never forwarded upstream.
+    metadata: dict[str, Any] | None = None
 
     def to_payload(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -64,7 +69,7 @@ class ChatCompletionRequest(BaseModel):
             "messages": [m.model_dump(exclude_none=True) for m in self.messages],
             "stream": self.stream,
         }
-        for opt in ("temperature", "top_p", "max_tokens"):
+        for opt in ("temperature", "top_p", "max_tokens", "stop"):
             value = getattr(self, opt)
             if value is not None:
                 payload[opt] = value
@@ -379,6 +384,9 @@ def create_app(
         async def sse() -> AsyncIterator[str]:
             code = "ok"
             response_parts: list[str] = []
+            # R13: stateful restore session reassembles DLP tokens split
+            # across SSE chunk boundaries.
+            restore_session = inspectors.stream_restore_session(ctx)
             # For usage accounting in streaming, capture last chunk's usage
             last_usage: dict[str, Any] | None = None
             try:
@@ -402,19 +410,28 @@ def create_app(
                         delta = delta_obj.get("content")
                         if not isinstance(delta, str) or not delta:
                             continue
-                        # Apply streaming DLP restore if available (sliding window handled inside)
+                        # Apply stateful streaming DLP restore (R13)
                         try:
-                            # Find DLP inspector state for streaming
-                            for inspector, part in zip(
-                                inspectors._inspectors, ctx.parts, strict=False
-                            ):
-                                if hasattr(inspector, "restore_stream_text"):
-                                    delta = inspector.restore_stream_text(delta, part)
+                            delta = restore_session.feed(delta)
                             delta_obj["content"] = delta
                         except Exception:
                             logger.debug("streaming DLP restore failed", exc_info=True)
                         response_parts.append(delta)
                     yield f"data: {json.dumps(chunk, separators=(',', ':'))}\n\n"
+                # Flush any held-back trailing text; never drop it silently.
+                try:
+                    flushed = restore_session.flush()
+                except Exception:
+                    flushed = ""
+                    logger.debug("streaming DLP flush failed", exc_info=True)
+                if flushed:
+                    response_parts.append(flushed)
+                    tail = {
+                        "id": "chatcmpl-stream",
+                        "object": "chat.completion.chunk",
+                        "choices": [{"index": 0, "delta": {"content": flushed}}],
+                    }
+                    yield f"data: {json.dumps(tail, separators=(',', ':'))}\n\n"
             except BlockedError as exc:
                 code = "blocked"
                 err = blocked_error(str(exc), reason=exc.reason)

@@ -41,6 +41,59 @@ pub fn sanitize(text: &str, vault: &mut HashMap<String, String>, scope: &mut Has
     out
 }
 
+/// Stateful restore session for one streamed response (R13).
+///
+/// Holds back a trailing partial token (`[EMAIL_ab12` without the closing
+/// bracket yet) until the next chunk completes it; `flush()` emits whatever
+/// is left so streamed text is never silently dropped.
+pub struct StreamRestore {
+    vault: HashMap<String, String>,
+    scope: HashMap<String, usize>,
+    policy: String,
+    carry: String,
+}
+
+impl StreamRestore {
+    pub fn new(
+        vault: HashMap<String, String>,
+        scope: HashMap<String, usize>,
+        policy: &str,
+    ) -> Self {
+        Self { vault, scope, policy: policy.to_string(), carry: String::new() }
+    }
+
+    fn restore(&self, text: &str) -> String {
+        deanonymize(text, &self.vault, &self.scope, &self.policy)
+    }
+
+    pub fn feed(&mut self, text: &str) -> String {
+        let buf = format!("{}{}", self.carry, text);
+        self.carry.clear();
+        // Trailing partial token: "[" followed only by token chars, no "]".
+        let cut = buf.rfind('[').filter(|&i| {
+            !buf[i..].contains(']') && buf[i + 1..].chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        });
+        let (head, carry) = match cut {
+            Some(i) if i + 1 + 64 >= buf.len() => buf.split_at(i),
+            Some(_) => {
+                // Overlong bracketed run: not a token, emit as-is.
+                (buf.as_str(), "")
+            }
+            None => (buf.as_str(), ""),
+        };
+        self.carry = carry.to_string();
+        self.restore(head)
+    }
+
+    pub fn flush(&mut self) -> String {
+        let tail = std::mem::take(&mut self.carry);
+        if tail.is_empty() {
+            return String::new();
+        }
+        self.restore(&tail)
+    }
+}
+
 pub fn deanonymize(text: &str, vault: &HashMap<String, String>, scope: &HashMap<String, usize>, policy: &str) -> String {
     let mut out = text.to_string();
     for (token, val) in vault {

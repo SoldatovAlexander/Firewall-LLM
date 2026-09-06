@@ -108,6 +108,43 @@ def test_dlp_block_mode_raises_when_pii_found():
         dlp.process_request(_payload("email me at ivan@mail.ru"))
 
 
+def test_stream_restore_reassembles_split_tokens():
+    dlp = DLPInspector(DLPConfig(mode="mask", restore_policy="restore"))
+    payload = _payload("contact ivan@mail.ru now")
+    ctx = dlp.process_request(payload)
+    token = payload["messages"][0]["content"].split("contact ")[1].split(" now")[0]
+    assert token.startswith("[EMAIL_")
+    mid = len(token) // 2
+    session = dlp.stream_session(ctx)
+    head = session.feed(f"call {token[:mid]}")
+    assert token[:mid] not in head  # partial token held back, not leaked
+    tail = session.feed(f"{token[mid:]} now")
+    assert "ivan@mail.ru" in head + tail
+    assert session.flush() == ""
+
+
+def test_stream_restore_mask_policy_and_unknown_tokens():
+    dlp = DLPInspector(DLPConfig(mode="mask", restore_policy="mask"))
+    payload = _payload("mail ivan@mail.ru")
+    ctx = dlp.process_request(payload)
+    session = dlp.stream_session(ctx)
+    out = session.feed("got [EMAIL_deadbeef] and [UNKNOWN_123] ok")
+    assert "[EMAIL]" in out
+    assert "[UNKNOWN_123]" in out  # unknown tokens pass through
+    assert session.flush() == ""
+
+
+def test_stream_restore_flush_emits_remainder():
+    dlp = DLPInspector(DLPConfig(mode="mask", restore_policy="restore"))
+    payload = _payload("mail ivan@mail.ru")
+    ctx = dlp.process_request(payload)
+    session = dlp.stream_session(ctx)
+    out = session.feed("trailing [EMAIL_abc")
+    assert "[EMAIL_abc" not in out
+    flushed = session.flush()
+    assert flushed != ""  # never silently drop user-visible text
+
+
 def test_dlp_off_mode_leaves_everything_untouched():
     dlp = DLPInspector(DLPConfig(mode="off", restore_policy="restore"))
     payload = _payload("email ivan@mail.ru")

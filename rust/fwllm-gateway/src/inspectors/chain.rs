@@ -114,6 +114,17 @@ impl InspectorChain {
         Ok(ChainState { dlp: DlpState { vault, scope } })
     }
 
+    /// Stateful per-response restore for streaming (R13).
+    pub fn stream_restore_session(&self, state: &ChainState) -> super::dlp::StreamRestore {
+        let policy =
+            if self.cfg.dlp.restore_policy == "restore" { "restore" } else { "mask" };
+        super::dlp::StreamRestore::new(
+            state.dlp.vault.clone(),
+            state.dlp.scope.clone(),
+            policy,
+        )
+    }
+
     pub fn process_response(&self, text: &str, state: &ChainState) -> String {
         if self.cfg.dlp.mode == "off" {
             return text.to_string();

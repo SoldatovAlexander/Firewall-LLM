@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -78,3 +79,47 @@ class DLPInspector:
     def restore_stream_text(self, text: str, part: DLPState) -> str:
         """Same as process_response; explicit alias for streaming use."""
         return self.process_response(text, part)
+
+    def stream_session(self, part: DLPState) -> StreamRestore:
+        """Stateful restore session for one streamed response (R13)."""
+        return StreamRestore(self, part)
+
+
+# Matches a trailing, possibly incomplete LightAnon token such as
+# "[EMAIL_ab12" at end of buffer (no closing bracket yet).
+_PARTIAL_TOKEN_RE = re.compile(r"\[[A-Za-z0-9_]{0,64}$")
+# Safety cap so a never-completing "[" cannot grow memory unboundedly.
+_MAX_CARRY = 256
+
+
+class StreamRestore:
+    """Reassembles DLP tokens split across SSE chunk boundaries (R13).
+
+    feed() holds back a trailing partial token and restores the complete
+    head; flush() emits whatever is left (never silently drops text).
+    Incomplete tokens do not match the vault, so they pass through as-is.
+    """
+
+    def __init__(self, inspector: DLPInspector, part: DLPState):
+        self._inspector = inspector
+        self._part = part
+        self._carry = ""
+
+    def feed(self, text: str) -> str:
+        buf = self._carry + text
+        self._carry = ""
+        match = _PARTIAL_TOKEN_RE.search(buf)
+        head = buf
+        if match is not None:
+            head, self._carry = buf[: match.start()], buf[match.start() :]
+        if len(self._carry) > _MAX_CARRY:
+            # Never-completing bracket: emit as plain text, keep it bounded.
+            head += self._carry
+            self._carry = ""
+        return self._inspector.process_response(head, self._part)
+
+    def flush(self) -> str:
+        tail, self._carry = self._carry, ""
+        if not tail:
+            return ""
+        return self._inspector.process_response(tail, self._part)
