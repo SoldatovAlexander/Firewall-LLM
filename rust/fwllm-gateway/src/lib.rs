@@ -503,6 +503,15 @@ async fn stream_response(
                     // usage; Drop covers the disconnect path with the flag.
                     let _guard = accountant_done;
                     let (prompt, done) = _guard.record_once();
+                    // R06: feed served usage to routing (normal finish; the
+                    // disconnect Drop path updates metering only — router
+                    // counters are a best-effort mirror, metering is truth).
+                    _guard
+                        .state
+                        .router
+                        .lock()
+                        .await
+                        .record_tokens_today(&_guard.provider_name, prompt as i64 + done as i64);
                     metrics::observe_request(
                         &_guard.client_id,
                         &_guard.provider_name,
@@ -901,6 +910,13 @@ async fn chat_completions(
                     );
                 }
             }
+            // R06: feed served usage to routing before the next admission,
+            // so budget rules observe it.
+            state
+                .router
+                .lock()
+                .await
+                .record_tokens_today(&provider_name, prompt as i64 + done as i64);
             if let Some(audit) = &state.audit {
                 let response_text = completion["choices"][0]["message"]["content"]
                     .as_str()

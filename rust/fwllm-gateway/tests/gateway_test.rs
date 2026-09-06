@@ -246,6 +246,109 @@ routing:
     let body = body_json(res).await;
     assert_eq!(body["routed_from"], "gpt-4o");
 }
+fn budget_routing() -> serde_yaml::Value {
+    serde_yaml::from_str(
+        r#"
+routing:
+  default_chain: [primary, backup]
+  rules:
+    - name: primary-budget
+      when: {provider: primary, provider_tokens_today: {gte: 5}}
+      action: {switch_to: backup}
+"#,
+    )
+    .unwrap()
+}
+
+async fn post_chat(app: &axum::Router, body: &str) -> axum::http::StatusCode {
+    use http_body_util::BodyExt;
+    let res = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header(auth_header().0, auth_header().1)
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = res.status();
+    let _ = res.into_body().collect().await.unwrap().to_bytes();
+    status
+}
+
+#[tokio::test]
+async fn routing_switches_to_backup_after_token_threshold() {
+    let primary = Arc::new(FakeProvider { fail: false, calls: Mutex::new(vec![]) });
+    let backup = Arc::new(FakeProvider { fail: false, calls: Mutex::new(vec![]) });
+    let mut providers: HashMap<String, Arc<dyn Provider>> = HashMap::new();
+    providers.insert("primary".into(), primary.clone());
+    providers.insert("backup".into(), backup.clone());
+    let app = fwllm_gateway::build_app(base_config(Some(budget_routing())), Some(Arc::new(providers)));
+    // FakeProvider reports 5 tokens per call: first served by primary,
+    // second must flip to backup once the threshold is reached.
+    let body = r#"{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}"#;
+    assert_eq!(post_chat(&app, body).await, 200);
+    assert_eq!(post_chat(&app, body).await, 200);
+    assert_eq!(primary.calls.lock().unwrap().len(), 1);
+    assert_eq!(backup.calls.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn routing_switches_to_backup_after_token_threshold_stream() {
+    struct UsageStream {
+        calls: Mutex<usize>,
+    }
+    impl Provider for UsageStream {
+        fn chat(&self, _p: Value) -> ChatFuture {
+            unreachable!()
+        }
+        fn chat_stream(&self, _p: Value) -> fwllm_gateway::providers::StreamFuture {
+            use futures_util::stream;
+            *self.calls.lock().unwrap() += 1;
+            Box::pin(async move {
+                let items: Vec<Result<Value, ProviderError>> = vec![
+                    Ok(json!({"choices":[{"delta":{"content":"Hi"}}]})),
+                    Ok(json!({"choices":[],"usage":{"prompt_tokens":3,"completion_tokens":2}})),
+                ];
+                Ok(Box::pin(stream::iter(items))
+                    as Pin<Box<dyn futures_util::Stream<Item = Result<Value, ProviderError>> + Send>>)
+            })
+        }
+    }
+    let primary = Arc::new(UsageStream { calls: Mutex::new(0) });
+    let backup = Arc::new(UsageStream { calls: Mutex::new(0) });
+    let mut providers: HashMap<String, Arc<dyn Provider>> = HashMap::new();
+    providers.insert("primary".into(), primary.clone());
+    providers.insert("backup".into(), backup.clone());
+    let app = fwllm_gateway::build_app(base_config(Some(budget_routing())), Some(Arc::new(providers)));
+    // Usage is upstream-reported (5 tokens), so one stream trips the
+    // threshold and the next stream must flip to backup.
+    let body = r#"{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}],"stream":true}"#;
+    assert_eq!(post_stream_with(&app, body).await, 200);
+    assert_eq!(post_stream_with(&app, body).await, 200);
+    assert_eq!(*primary.calls.lock().unwrap(), 1);
+    assert_eq!(*backup.calls.lock().unwrap(), 1);
+}
+
+#[tokio::test]
+#[should_panic(expected = "state_store")]
+async fn redis_state_store_rejected() {
+    let routing: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+routing:
+  default_chain: [primary]
+  state_store: redis
+"#,
+    )
+    .unwrap();
+    let cfg = base_config(Some(routing));
+    let _ = fwllm_gateway::build_app(cfg, None);
+}
+
 #[tokio::test]
 async fn injection_blocked_both_stream_modes() {
     for stream in [false, true] {

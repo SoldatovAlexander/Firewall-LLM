@@ -100,6 +100,16 @@ impl PolicyEngine {
         *self.provider_tokens.entry((provider.to_string(), day.to_string())).or_default() += total_tokens;
     }
 
+    /// R06: record served usage against today's budget. Router counters are
+    /// a best-effort in-memory mirror of metering (the source of truth), so
+    /// moving to shared storage cannot double-count: only this method
+    /// writes here, and only from the gateway paths below.
+    pub fn record_tokens_today(&mut self, provider: &str, total_tokens: i64) {
+        let now = (self.clock)();
+        let day = day_string(now);
+        self.record_tokens(provider, total_tokens, &day);
+    }
+
     pub fn on_attack_detected(&mut self, severity: &str, client: &str) {
         let af = self.routing.attack_failover.clone();
         if !af.enabled || severity_rank(severity) < severity_rank(&af.min_severity) {

@@ -92,6 +92,16 @@ impl AppState {
         });
 
         let mut routing = config.routing.clone();
+        // R06: the Rust gateway keeps routing state in memory only. Accepting
+        // `state_store = "redis"` silently would lose budgets and blocks on
+        // restart and across replicas — fail fast until RouterStateStore
+        // exists (Python already implements the redis store).
+        if routing.state_store == "redis" {
+            panic!(
+                "routing.state_store = 'redis' is not supported by the Rust gateway: \
+                 use 'memory' (single process) or the Python gateway for shared routing state"
+            );
+        }
         if routing.default_chain.is_empty() {
             routing.default_chain = config.providers.keys().cloned().collect();
         }
