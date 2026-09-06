@@ -24,7 +24,7 @@ from fwllm.errors import (
     validation_error_handler,
 )
 from fwllm.inspectors.chain import InspectorChain
-from fwllm.metering import Metering, QuotaExceeded, estimate_usage
+from fwllm.metering import Metering, QuotaExceeded, Reservation, estimate_usage
 from fwllm.observability.metrics import observe_request
 from fwllm.providers.base import BlockedError, Provider, ProviderError
 from fwllm.router.policy import PolicyEngine
@@ -335,11 +335,31 @@ def create_app(
             _metrics("blocked")
             _audit_now("blocked", str(exc), messages=body.model_dump()["messages"])
             raise blocked_error(str(exc), reason=exc.reason) from exc
+        # R05: atomic admission replaces separate check calls — the request
+        # and its token budget (prompt estimate + completion cap handed to
+        # the adapter) are reserved in one step.
+        prompt_est, _ = estimate_usage(_prompt_text(payload), "")
+        completion_cap = body.max_tokens or config.quotas.completion_reserve_tokens
+        reservation: Reservation | None = None
         try:
             if metering._backend_fail_closed:
-                await metering.check_client(client_id)
+                reservation = await metering.admit(
+                    client=client_id,
+                    provider=provider_name,
+                    model=body.model,
+                    prompt_est=prompt_est,
+                    completion_cap=completion_cap,
+                )
             else:
-                await _metering_safe(metering.check_client(client_id))
+                reservation = await _metering_safe(
+                    metering.admit(
+                        client=client_id,
+                        provider=provider_name,
+                        model=body.model,
+                        prompt_est=prompt_est,
+                        completion_cap=completion_cap,
+                    )
+                )
         except QuotaExceeded as exc:
             _metrics("rate_limited")
             _audit_now("rate_limited", str(exc))
@@ -354,33 +374,32 @@ def create_app(
                 message=f"metering backend unavailable: {exc}",
                 code="backend_unavailable",
             ) from exc
-        try:
-            if metering._backend_fail_closed:
-                await metering.check_provider(provider_name)
-            else:
-                await _metering_safe(metering.check_provider(provider_name))
-        except QuotaExceeded as exc:
-            _metrics("rate_limited")
-            _audit_now("rate_limited", str(exc))
-            raise rate_limit_error(str(exc)) from exc
-        except Exception as exc:
-            _metrics("backend_error")
-            _audit_now("backend_error", str(exc))
-            raise ApiError(
-                status=503,
-                type_="rate_limit_error",
-                message=f"metering backend unavailable: {exc}",
-                code="backend_unavailable",
-            ) from exc
+
+        async def _settle_safe(
+            prompt: int, completion: int, usage_source: str = "upstream"
+        ) -> None:
+            if reservation is None:
+                return
+            await _metering_safe(
+                metering.settle(
+                    reservation,
+                    prompt=prompt,
+                    completion=completion,
+                    usage_source=usage_source,
+                )
+            )
 
         if not body.stream:
             try:
                 result = await provider.chat(payload)
             except BlockedError as exc:
+                # R05: input may have been spent; completion never happened.
+                await _settle_safe(prompt_est, 0)
                 _metrics("blocked")
                 _audit_now("blocked", str(exc))
                 raise blocked_error(str(exc), reason=exc.reason) from exc
             except ProviderError as exc:
+                await _settle_safe(prompt_est, 0)
                 _metrics("upstream_error")
                 _audit_now("upstream_error", str(exc))
                 raise upstream_error(str(exc)) from exc
@@ -402,16 +421,8 @@ def create_app(
                     _prompt_text(payload), response_text
                 )
                 usage_source = "estimated"
-            await _metering_safe(
-                metering.record(
-                    client=client_id,
-                    provider=provider_name,
-                    model=body.model,
-                    prompt=prompt_tokens,
-                    completion=completion_tokens,
-                    usage_source=usage_source,
-                )
-            )
+            # R05: reconcile the admission reserve with actual usage.
+            await _settle_safe(prompt_tokens, completion_tokens, usage_source)
             _audit_now(
                 "ok", response_text, prompt_tokens, completion_tokens,
                 usage_source=usage_source,
@@ -494,17 +505,17 @@ def create_app(
                         _prompt_text(payload), "".join(response_parts)
                     )
                     usage_source = "estimated"
+                # R05: reconcile the admission reserve with actual usage.
                 try:
-                    await metering.record(
-                        client=client_id,
-                        provider=provider_name,
-                        model=body.model,
-                        prompt=prompt_tokens,
-                        completion=completion_tokens,
-                        usage_source=usage_source,
-                    )
+                    if reservation is not None:
+                        await metering.settle(
+                            reservation,
+                            prompt=prompt_tokens,
+                            completion=completion_tokens,
+                            usage_source=usage_source,
+                        )
                 except Exception:
-                    logger.debug("streaming metering record failed", exc_info=True)
+                    logger.debug("streaming metering settle failed", exc_info=True)
                 _metrics(
                     code,
                     prompt=prompt_tokens,

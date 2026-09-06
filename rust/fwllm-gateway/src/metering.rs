@@ -20,20 +20,69 @@ pub struct QuotaExceeded {
     pub limit: i64,
 }
 
+/// Which budget an atomic admission was denied by (R05).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReserveDenied {
+    ClientTokens,
+    ClientRequests,
+    ProviderTokens,
+}
+
+#[derive(Debug)]
+pub enum ReserveError {
+    Denied(ReserveDenied),
+    Backend(String),
+}
+
+/// Atomic admission request (R05): admit iff the client request counter is
+/// below its limit and both limited token buckets fit the reserve; then
+/// apply all increments plus the open reservation record in one step.
+/// A limit < 0 means "count without gating".
+pub struct AdmitOp {
+    pub c_tokens_key: String,
+    pub c_tokens_limit: i64,
+    pub c_req_key: String,
+    pub c_req_limit: i64,
+    pub p_tokens_key: String,
+    pub p_tokens_limit: i64,
+    pub p_req_key: String,
+    pub m_tokens_key: String,
+    pub reserve: i64,
+    pub reservation_key: String,
+    pub reservation_ttl_secs: u64,
+    pub bucket_ttl_secs: u64,
+}
+
+/// Idempotent settle request (R05): apply only for an open reservation.
+pub struct SettleReq {
+    pub reservation_key: String,
+    pub token_keys: Vec<String>,
+    pub delta: i64,
+    pub bucket_ttl_secs: u64,
+}
+
 /// Storage abstraction so tests can run without Redis.
 pub trait MeteringStore: Send + Sync {
     fn incr(&self, key: &str, amount: i64) -> Result<i64, String>;
     fn get(&self, key: &str) -> Result<i64, String>;
     fn ping(&self) -> Result<(), String>;
+    fn reserve(&self, req: &AdmitOp) -> Result<(), ReserveError>;
+    /// Returns true when the settle was applied (false = already settled or
+    /// expired reservation — a no-op by design).
+    fn settle(&self, req: &SettleReq) -> Result<bool, String>;
 }
 
 pub struct InMemoryStore {
     counters: std::sync::Mutex<HashMap<String, i64>>,
+    settled: std::sync::Mutex<std::collections::HashSet<String>>,
 }
 
 impl Default for InMemoryStore {
     fn default() -> Self {
-        Self { counters: std::sync::Mutex::new(HashMap::new()) }
+        Self {
+            counters: std::sync::Mutex::new(HashMap::new()),
+            settled: std::sync::Mutex::new(std::collections::HashSet::new()),
+        }
     }
 }
 
@@ -49,6 +98,45 @@ impl MeteringStore for InMemoryStore {
     }
     fn ping(&self) -> Result<(), String> {
         Ok(())
+    }
+    fn reserve(&self, req: &AdmitOp) -> Result<(), ReserveError> {
+        // Single lock section: atomic for one process (test backend).
+        let mut map = self.counters.lock().unwrap();
+        let get = |map: &HashMap<String, i64>, key: &str| {
+            map.get(key).copied().unwrap_or(0)
+        };
+        if req.c_req_limit >= 0 && get(&map, &req.c_req_key) + 1 > req.c_req_limit {
+            return Err(ReserveError::Denied(ReserveDenied::ClientRequests));
+        }
+        if req.c_tokens_limit >= 0
+            && get(&map, &req.c_tokens_key) + req.reserve > req.c_tokens_limit
+        {
+            return Err(ReserveError::Denied(ReserveDenied::ClientTokens));
+        }
+        if req.p_tokens_limit >= 0
+            && get(&map, &req.p_tokens_key) + req.reserve > req.p_tokens_limit
+        {
+            return Err(ReserveError::Denied(ReserveDenied::ProviderTokens));
+        }
+        *map.entry(req.c_tokens_key.clone()).or_default() += req.reserve;
+        *map.entry(req.c_req_key.clone()).or_default() += 1;
+        *map.entry(req.p_tokens_key.clone()).or_default() += req.reserve;
+        *map.entry(req.p_req_key.clone()).or_default() += 1;
+        *map.entry(req.m_tokens_key.clone()).or_default() += req.reserve;
+        Ok(())
+    }
+    fn settle(&self, req: &SettleReq) -> Result<bool, String> {
+        let mut settled = self.settled.lock().unwrap();
+        if !settled.insert(req.reservation_key.clone()) {
+            return Ok(false);
+        }
+        drop(settled);
+        let mut map = self.counters.lock().unwrap();
+        for key in &req.token_keys {
+            let v = map.get(key).copied().unwrap_or(0) + req.delta;
+            map.insert(key.clone(), v.max(0));
+        }
+        Ok(true)
     }
 }
 
@@ -78,7 +166,91 @@ impl MeteringStore for RedisStore {
             .map_err(|e| e.to_string())?;
         Ok(())
     }
+    fn reserve(&self, req: &AdmitOp) -> Result<(), ReserveError> {
+        // R05: one Lua script — check and reserve are atomic across
+        // processes. Standalone/Sentinel only; Cluster rejects cross-slot
+        // scripts (documented, same as Python).
+        let mut conn = self
+            .client
+            .get_connection()
+            .map_err(|e| ReserveError::Backend(e.to_string()))?;
+        let res: Vec<redis::Value> = redis::Script::new(ADMIT_LUA)
+            .key(&req.c_tokens_key)
+            .key(&req.c_req_key)
+            .key(&req.p_tokens_key)
+            .key(&req.p_req_key)
+            .key(&req.m_tokens_key)
+            .key(&req.reservation_key)
+            .arg(req.c_tokens_limit)
+            .arg(req.c_req_limit)
+            .arg(req.p_tokens_limit)
+            .arg(req.reserve)
+            .arg(req.reservation_ttl_secs as i64)
+            .arg(req.bucket_ttl_secs as i64)
+            .invoke(&mut conn)
+            .map_err(|e| ReserveError::Backend(e.to_string()))?;
+        match res.as_slice() {
+            [redis::Value::BulkString(status), _] if status == b"ok" => Ok(()),
+            [redis::Value::BulkString(scope), _] if scope == b"requests" => {
+                Err(ReserveError::Denied(ReserveDenied::ClientRequests))
+            }
+            [redis::Value::BulkString(scope), _] if scope == b"provider_tokens" => {
+                Err(ReserveError::Denied(ReserveDenied::ProviderTokens))
+            }
+            _ => Err(ReserveError::Denied(ReserveDenied::ClientTokens)),
+        }
+    }
+    fn settle(&self, req: &SettleReq) -> Result<bool, String> {
+        let mut conn = self.client.get_connection().map_err(|e| e.to_string())?;
+        let applied: i64 = redis::Script::new(SETTLE_LUA)
+            .key(&req.reservation_key)
+            .key(&req.token_keys[0])
+            .key(&req.token_keys[1])
+            .key(&req.token_keys[2])
+            .arg(req.delta)
+            .arg(req.bucket_ttl_secs as i64)
+            .invoke(&mut conn)
+            .map_err(|e| e.to_string())?;
+        Ok(applied == 1)
+    }
 }
+
+/// R05 Lua scripts (same semantics as the Python side; see metering.py).
+const ADMIT_LUA: &str = r#"
+local ct = tonumber(redis.call('GET', KEYS[1]) or '0')
+local cr = tonumber(redis.call('GET', KEYS[2]) or '0')
+local pt = tonumber(redis.call('GET', KEYS[3]) or '0')
+local reserve = tonumber(ARGV[4])
+if tonumber(ARGV[1]) >= 0 and ct + reserve > tonumber(ARGV[1]) then
+  return {'tokens', ct}
+end
+if tonumber(ARGV[2]) >= 0 and cr + 1 > tonumber(ARGV[2]) then
+  return {'requests', cr}
+end
+if tonumber(ARGV[3]) >= 0 and pt + reserve > tonumber(ARGV[3]) then
+  return {'provider_tokens', pt}
+end
+redis.call('INCRBY', KEYS[1], reserve)
+redis.call('INCR', KEYS[2])
+redis.call('INCRBY', KEYS[3], reserve)
+redis.call('INCR', KEYS[4])
+redis.call('INCRBY', KEYS[5], reserve)
+for i = 1, 5 do redis.call('EXPIRE', KEYS[i], ARGV[6]) end
+redis.call('SET', KEYS[6], 'open', 'EX', ARGV[5])
+return {'ok', reserve}
+"#;
+
+const SETTLE_LUA: &str = r#"
+if redis.call('GET', KEYS[1]) ~= 'open' then return 0 end
+redis.call('SET', KEYS[1], 'settled', 'KEEPTTL')
+local d = tonumber(ARGV[1])
+for i = 2, 4 do
+  local v = tonumber(redis.call('GET', KEYS[i]) or '0') + d
+  if v < 0 then v = 0 end
+  redis.call('SET', KEYS[i], v, 'EX', ARGV[2])
+end
+return 1
+"#;
 
 pub struct Metering {
     store: Box<dyn MeteringStore>,
@@ -86,7 +258,28 @@ pub struct Metering {
     client_requests_per_day: Option<i64>,
     provider_tokens_per_day: Option<i64>,
     backend_fail_closed: bool,
+    completion_reserve_tokens: i64,
 }
+
+/// Open budget reservation from Metering::admit (R05).
+#[derive(Debug, Clone)]
+pub struct Reservation {
+    pub id: String,
+    pub client: String,
+    pub provider: String,
+    pub model: String,
+    pub prompt_est: i64,
+    pub completion_cap: i64,
+}
+
+impl Reservation {
+    pub fn reserved_total(&self) -> i64 {
+        self.prompt_est + self.completion_cap
+    }
+}
+
+const RSV_TTL_SECS: u64 = 600;
+const BUCKET_TTL_SECS: u64 = 60 * 60 * 48;
 
 impl Metering {
     pub fn new(store: Box<dyn MeteringStore>, quotas: &fwllm_core::config::Quotas) -> Self {
@@ -96,6 +289,7 @@ impl Metering {
             client_requests_per_day: quotas.client_requests_per_day,
             provider_tokens_per_day: quotas.provider_tokens_per_day,
             backend_fail_closed: quotas.backend_fail_closed,
+            completion_reserve_tokens: quotas.completion_reserve_tokens,
         }
     }
 
@@ -192,6 +386,89 @@ impl Metering {
         let _ = self.store.incr(&format!("fwllm:p:tokens:{provider}:{day}"), total);
         let _ = self.store.incr(&format!("fwllm:p:req:{provider}:{day}"), 1);
         let _ = self.store.incr(&format!("fwllm:m:tokens:{model}:{day}"), total);
+    }
+
+    fn token_keys(&self, rsv: &Reservation) -> (String, String, String) {
+        let day = self.day();
+        (
+            format!("fwllm:c:tokens:{0}:{day}", rsv.client),
+            format!("fwllm:p:tokens:{0}:{day}", rsv.provider),
+            format!("fwllm:m:tokens:{0}:{day}", rsv.model),
+        )
+    }
+
+    /// Atomically check quotas and reserve budget (R05). The reserve is the
+    /// prompt estimate plus the completion cap handed to the adapter.
+    /// Denied admission consumes nothing.
+    pub fn admit(
+        &self,
+        client_id: &str,
+        provider: &str,
+        model: &str,
+        prompt_est: i64,
+        completion_cap: Option<i64>,
+    ) -> Result<Reservation, MeteringError> {
+        self.ensure_ready()?;
+        let day = self.day();
+        let rsv = Reservation {
+            id: format!(
+                "{:016x}{:016x}",
+                rand::random::<u64>(),
+                rand::random::<u64>()
+            ),
+            client: client_id.to_string(),
+            provider: provider.to_string(),
+            model: model.to_string(),
+            prompt_est: prompt_est.max(0),
+            completion_cap: completion_cap.unwrap_or(self.completion_reserve_tokens).max(0),
+        };
+        let op = AdmitOp {
+            c_tokens_key: format!("fwllm:c:tokens:{client_id}:{day}"),
+            c_tokens_limit: self.client_tokens_per_day.unwrap_or(-1),
+            c_req_key: format!("fwllm:c:req:{client_id}:{day}"),
+            c_req_limit: self.client_requests_per_day.unwrap_or(-1),
+            p_tokens_key: format!("fwllm:p:tokens:{provider}:{day}"),
+            p_tokens_limit: self.provider_tokens_per_day.unwrap_or(-1),
+            p_req_key: format!("fwllm:p:req:{provider}:{day}"),
+            m_tokens_key: format!("fwllm:m:tokens:{model}:{day}"),
+            reserve: rsv.reserved_total(),
+            reservation_key: format!("fwllm:rsv:{0}", rsv.id),
+            reservation_ttl_secs: RSV_TTL_SECS,
+            bucket_ttl_secs: BUCKET_TTL_SECS,
+        };
+        match self.store.reserve(&op) {
+            Ok(()) => Ok(rsv),
+            Err(ReserveError::Denied(denied)) => {
+                let (scope, limit) = match denied {
+                    ReserveDenied::ClientTokens => {
+                        ("tokens", self.client_tokens_per_day.unwrap_or(0))
+                    }
+                    ReserveDenied::ClientRequests => {
+                        ("requests", self.client_requests_per_day.unwrap_or(0))
+                    }
+                    ReserveDenied::ProviderTokens => {
+                        ("provider_tokens", self.provider_tokens_per_day.unwrap_or(0))
+                    }
+                };
+                Err(MeteringError::QuotaExceeded { scope, limit })
+            }
+            // Backend errors surface like check_* errors: the caller maps
+            // them to 503 fail-closed or skips fail-open.
+            Err(ReserveError::Backend(msg)) => Err(MeteringError::BackendUnavailable(msg)),
+        }
+    }
+
+    /// Reconcile a reservation with actual usage, exactly once (R05).
+    /// Best-effort like record: backend errors are ignored.
+    pub fn settle(&self, rsv: &Reservation, prompt: i64, completion: i64) {
+        let delta = (prompt + completion) - rsv.reserved_total();
+        let (ctok, ptok, mtok) = self.token_keys(rsv);
+        let _ = self.store.settle(&SettleReq {
+            reservation_key: format!("fwllm:rsv:{0}", rsv.id),
+            token_keys: vec![ctok, ptok, mtok],
+            delta,
+            bucket_ttl_secs: BUCKET_TTL_SECS,
+        });
     }
 }
 

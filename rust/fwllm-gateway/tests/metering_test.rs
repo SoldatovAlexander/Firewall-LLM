@@ -9,7 +9,42 @@ fn quotas(tokens: Option<i64>, requests: Option<i64>) -> Quotas {
         client_requests_per_day: requests,
         provider_tokens_per_day: None,
         backend_fail_closed: false,
+        completion_reserve_tokens: 1024,
     }
+}
+
+#[test]
+fn admit_reserves_settle_refunds_and_is_idempotent() {
+    let m = Metering::new(Box::new(InMemoryStore::default()), &quotas(Some(100), None));
+    let rsv = m.admit("a", "p", "m", 10, Some(20)).unwrap();
+    // reservation holds the full 30 on the token counter
+    assert!(m.check_client("a").is_ok());
+    m.settle(&rsv, 5, 5);
+    // repeat settle is a no-op (provider retries, double finalize)
+    m.settle(&rsv, 5, 5);
+    // only the actual 10 remain: admitting 90 more fits, 91 does not
+    m.admit("a", "p", "m", 45, Some(46)).unwrap_err();
+    let rsv2 = m.admit("a", "p", "m", 45, Some(45)).unwrap();
+    m.settle(&rsv2, 0, 0);
+}
+
+#[test]
+fn concurrent_admit_single_request_slot() {
+    use std::sync::Arc;
+    let m = Arc::new(Metering::new(
+        Box::new(InMemoryStore::default()),
+        &quotas(None, Some(1)),
+    ));
+    let admitted = std::thread::scope(|s| {
+        let handles: Vec<_> = (0..20)
+            .map(|_| {
+                let m = m.clone();
+                s.spawn(move || m.admit("a", "p", "m", 1, Some(1)).is_ok())
+            })
+            .collect();
+        handles.into_iter().filter_map(|h| h.join().ok()).filter(|ok| *ok).count()
+    });
+    assert_eq!(admitted, 1);
 }
 
 #[test]
@@ -52,6 +87,18 @@ impl fwllm_gateway::metering::MeteringStore for BrokenStore {
         Err("down".to_string())
     }
     fn ping(&self) -> Result<(), String> {
+        Err("down".to_string())
+    }
+    fn reserve(
+        &self,
+        _req: &fwllm_gateway::metering::AdmitOp,
+    ) -> Result<(), fwllm_gateway::metering::ReserveError> {
+        Err(fwllm_gateway::metering::ReserveError::Backend("down".to_string()))
+    }
+    fn settle(
+        &self,
+        _req: &fwllm_gateway::metering::SettleReq,
+    ) -> Result<bool, String> {
         Err("down".to_string())
     }
 }

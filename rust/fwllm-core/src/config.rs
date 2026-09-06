@@ -83,6 +83,14 @@ pub struct Quotas {
     pub provider_tokens_per_day: Option<i64>,
     #[serde(rename = "backend_fail_closed", default)]
     pub backend_fail_closed: bool,
+    /// R05: completion budget reserved per request when the client sets no
+    /// max_tokens (reserve = prompt estimate + this cap).
+    #[serde(rename = "completion_reserve_tokens", default = "default_completion_reserve")]
+    pub completion_reserve_tokens: i64,
+}
+
+fn default_completion_reserve() -> i64 {
+    1024
 }
 
 /// Threshold comparisons for routing rules.

@@ -38,6 +38,9 @@ class Quotas(BaseModel):
     provider_tokens_per_day: int | None = None
     # fail-closed: reject requests if metering backend (Redis) is unreachable
     backend_fail_closed: bool = False
+    # R05: completion budget reserved per request when the client sets no
+    # max_tokens (reserve = prompt estimate + this cap).
+    completion_reserve_tokens: int = 1024
 
 
 class DLPConfig(BaseModel):

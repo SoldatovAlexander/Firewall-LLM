@@ -282,6 +282,7 @@ struct StreamAccountant {
     completion_text: Arc<Mutex<String>>,
     last_usage: Arc<Mutex<Option<Value>>>,
     recorded: Arc<std::sync::atomic::AtomicBool>,
+    reservation: Option<crate::metering::Reservation>,
 }
 
 impl StreamAccountant {
@@ -315,14 +316,20 @@ impl StreamAccountant {
             }
         };
         drop(guard);
+        // R05: reconcile the admission reserve; fall back to a plain record
+        // when admission was skipped (fail-open without reservation).
         if let Some(metering) = &self.state.metering {
-            metering.record(
-                &self.client_id,
-                &self.provider_name,
-                &self.model,
-                prompt as i64,
-                done as i64,
-            );
+            if let Some(rsv) = &self.reservation {
+                metering.settle(rsv, prompt as i64, done as i64);
+            } else {
+                metering.record(
+                    &self.client_id,
+                    &self.provider_name,
+                    &self.model,
+                    prompt as i64,
+                    done as i64,
+                );
+            }
         }
         (prompt, done)
     }
@@ -369,6 +376,7 @@ async fn stream_response(
     payload: Value,
     started: Instant,
     chain_state: crate::inspectors::chain::ChainState,
+    reservation: Option<crate::metering::Reservation>,
 ) -> Response {
     let client_id = client_id.to_string();
     let provider_name = provider_name.to_string();
@@ -458,6 +466,7 @@ async fn stream_response(
                 completion_text: completion_text.clone(),
                 last_usage: last_usage.clone(),
                 recorded: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                reservation: reservation.clone(),
             };
             let with_done = {
                 let restore_done = restore_session.clone();
@@ -487,6 +496,7 @@ async fn stream_response(
                     completion_text: accountant.completion_text.clone(),
                     last_usage: accountant.last_usage.clone(),
                     recorded: accountant.recorded.clone(),
+                    reservation: accountant.reservation.clone(),
                 };
                 tail.chain(futures_util::stream::once(async move {
                     // R03: always count the admitted request, even on zero
@@ -693,50 +703,50 @@ async fn chat_completions(
 
     let started = Instant::now();
 
-    // quota gate -> 429, or 503 when fail-closed and backend unreachable
-    if let Some(metering) = &state.metering {
-        match metering.check_client(&client_id) {
-            Ok(()) => {}
-            Err(crate::metering::MeteringError::QuotaExceeded { scope, limit }) => {
-                metrics::observe_request(&client_id, &provider_name, &body.model, "rate_limited", 0.0, 0, 0);
-                return ApiError::rate_limited(format!("daily {scope} quota exceeded (limit={limit})"))
-                    .into_response();
-            }
-            Err(crate::metering::MeteringError::BackendUnavailable(msg)) => {
-                if metering.backend_fail_closed() {
-                    metrics::observe_request(&client_id, &provider_name, &body.model, "backend_error", 0.0, 0, 0);
-                    return ApiError {
-                        status: axum::http::StatusCode::SERVICE_UNAVAILABLE,
-                        kind: "rate_limit_error",
-                        message: format!("metering backend unavailable: {msg}"),
-                        code: Some("backend_unavailable"),
-                        details: None,
-                    }.into_response();
+    // R05: atomic admission replaces separate check calls — the request and
+    // its token budget (prompt estimate + completion cap handed to the
+    // adapter) are reserved in one step. 429 on breach, 503 when
+    // fail-closed and the backend is unreachable.
+    let request_text: String = body
+        .messages
+        .iter()
+        .filter_map(|m| m.content.as_deref())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let (prompt_est, _) = estimate_usage(&request_text, "");
+    let reservation: Option<crate::metering::Reservation> =
+        if let Some(metering) = &state.metering {
+            match metering.admit(
+                &client_id,
+                &provider_name,
+                &body.model,
+                prompt_est as i64,
+                body.max_tokens,
+            ) {
+                Ok(rsv) => Some(rsv),
+                Err(crate::metering::MeteringError::QuotaExceeded { scope, limit }) => {
+                    metrics::observe_request(&client_id, &provider_name, &body.model, "rate_limited", 0.0, 0, 0);
+                    return ApiError::rate_limited(format!("daily {scope} quota exceeded (limit={limit})"))
+                        .into_response();
                 }
-                // fail-open: ignore backend errors
-            }
-        }
-        match metering.check_provider(&provider_name) {
-            Ok(()) => {}
-            Err(crate::metering::MeteringError::QuotaExceeded { scope, limit }) => {
-                metrics::observe_request(&client_id, &provider_name, &body.model, "rate_limited", 0.0, 0, 0);
-                return ApiError::rate_limited(format!("daily {scope} quota exceeded (limit={limit})"))
-                    .into_response();
-            }
-            Err(crate::metering::MeteringError::BackendUnavailable(msg)) => {
-                if metering.backend_fail_closed() {
-                    metrics::observe_request(&client_id, &provider_name, &body.model, "backend_error", 0.0, 0, 0);
-                    return ApiError {
-                        status: axum::http::StatusCode::SERVICE_UNAVAILABLE,
-                        kind: "rate_limit_error",
-                        message: format!("metering backend unavailable: {msg}"),
-                        code: Some("backend_unavailable"),
-                        details: None,
-                    }.into_response();
+                Err(crate::metering::MeteringError::BackendUnavailable(msg)) => {
+                    if metering.backend_fail_closed() {
+                        metrics::observe_request(&client_id, &provider_name, &body.model, "backend_error", 0.0, 0, 0);
+                        return ApiError {
+                            status: axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                            kind: "rate_limit_error",
+                            message: format!("metering backend unavailable: {msg}"),
+                            code: Some("backend_unavailable"),
+                            details: None,
+                        }.into_response();
+                    }
+                    // fail-open: ignore backend errors
+                    None
                 }
             }
-        }
-    }
+        } else {
+            None
+        };
 
     let provider = match state.providers.get(&provider_name) {
         Some(p) => p.clone(),
@@ -823,7 +833,7 @@ async fn chat_completions(
     };
 
     if body.stream {
-        return stream_response(&state, &client_id, &provider_name, &body.model, provider, payload, started, chain_state)
+        return stream_response(&state, &client_id, &provider_name, &body.model, provider, payload, started, chain_state, reservation)
             .await;
     }
 
@@ -877,14 +887,19 @@ async fn chat_completions(
                 prompt,
                 done,
             );
+            // R05: reconcile the admission reserve with actual usage.
             if let Some(metering) = &state.metering {
-                metering.record(
-                    &client_id,
-                    &provider_name,
-                    &body.model,
-                    prompt as i64,
-                    done as i64,
-                );
+                if let Some(rsv) = &reservation {
+                    metering.settle(rsv, prompt as i64, done as i64);
+                } else {
+                    metering.record(
+                        &client_id,
+                        &provider_name,
+                        &body.model,
+                        prompt as i64,
+                        done as i64,
+                    );
+                }
             }
             if let Some(audit) = &state.audit {
                 let response_text = completion["choices"][0]["message"]["content"]
@@ -900,6 +915,12 @@ async fn chat_completions(
             (StatusCode::OK, Json(completion)).into_response()
         }
         Err(err) => {
+            // R05: input may have been spent; completion never happened.
+            if let Some(metering) = &state.metering {
+                if let Some(rsv) = &reservation {
+                    metering.settle(rsv, prompt_est as i64, 0);
+                }
+            }
             metrics::observe_request(&client_id, &provider_name, &body.model, "upstream_error", duration, 0, 0);
             if let Some(audit) = &state.audit {
                 audit.write(

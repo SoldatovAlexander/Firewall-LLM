@@ -187,6 +187,82 @@ async def test_stream_disconnect_still_records_request():
         assert int(await redis.get(f"fwllm:c:req:alice:{day}") or 0) == 1
 
 
+async def test_concurrent_requests_single_upstream_call():
+    """R05 acceptance: 20 concurrent streams with 1 slot → 1 upstream call."""
+    import asyncio
+
+    import httpx
+
+    calls = 0
+
+    class SlowProvider(FakeProvider):
+        async def chat_stream(self, payload: dict[str, Any]):
+            nonlocal calls
+            calls += 1
+            await asyncio.sleep(0.05)
+            yield {"choices": [{"delta": {"content": "Hi"}}]}
+
+    quotas = Quotas(client_requests_per_day=1)
+    redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
+    cfg = Config(
+        server=ServerConfig(),
+        providers={"mock": ProviderConfig(base_url="http://mock.local/v1")},
+        clients={CLIENT_KEY: "alice"},
+        quotas=quotas,
+    )
+    metering = Metering(redis, quotas=quotas.model_dump(exclude_none=True))
+    app = create_app(cfg, providers={"mock": SlowProvider()}, metering=metering)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://test"
+    ) as http:
+        responses = await asyncio.gather(
+            *[
+                http.post(
+                    "/v1/chat/completions",
+                    json=_body(stream=True),
+                    headers=_headers(),
+                )
+                for _ in range(20)
+            ]
+        )
+    statuses = sorted(r.status_code for r in responses)
+    assert statuses == [200] + [429] * 19
+    assert calls == 1
+
+
+async def test_provider_error_keeps_prompt_charge_refunds_completion():
+    """R05: upstream failure settles the reserve (prompt kept, cap refunded)."""
+    from fwllm.providers.base import ProviderError
+
+    class FailingProvider(FakeProvider):
+        async def chat(self, payload: dict[str, Any]) -> dict[str, Any]:
+            raise ProviderError("upstream exploded")
+
+    quotas = Quotas(client_tokens_per_day=100_000)
+    redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
+    cfg = Config(
+        server=ServerConfig(),
+        providers={"mock": ProviderConfig(base_url="http://mock.local/v1")},
+        clients={CLIENT_KEY: "alice"},
+        quotas=quotas,
+    )
+    metering = Metering(redis, quotas=quotas.model_dump(exclude_none=True))
+    app = create_app(cfg, providers={"mock": FailingProvider()}, metering=metering)
+    prompt = "x" * 400  # prompt_est = 100
+    with TestClient(app) as c:
+        r = c.post(
+            "/v1/chat/completions",
+            json=_body(messages=[{"role": "user", "content": prompt}]),
+            headers=_headers(),
+        )
+        assert r.status_code == 502
+    day = _today()
+    # only the prompt estimate stays; the completion cap was refunded
+    assert int(await redis.get(f"fwllm:c:tokens:alice:{day}") or 0) == 100
+    assert int(await redis.get(f"fwllm:c:req:alice:{day}") or 0) == 1
+
+
 async def test_quota_exceeded_returns_429_contract_error():
     quotas = Quotas(client_tokens_per_day=3)
     client, redis = _app(quotas)

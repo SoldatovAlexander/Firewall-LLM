@@ -500,10 +500,15 @@ fn quotas(requests: Option<i64>, tokens: Option<i64>) -> fwllm_core::config::Quo
         client_requests_per_day: requests,
         provider_tokens_per_day: None,
         backend_fail_closed: false,
+        completion_reserve_tokens: 1024,
     }
 }
 
 async fn post_stream(app: &axum::Router) -> axum::http::StatusCode {
+    post_stream_with(app, r#"{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}],"stream":true}"#).await
+}
+
+async fn post_stream_with(app: &axum::Router, body: &str) -> axum::http::StatusCode {
     use http_body_util::BodyExt;
     let res = app
         .clone()
@@ -513,9 +518,7 @@ async fn post_stream(app: &axum::Router) -> axum::http::StatusCode {
                 .uri("/v1/chat/completions")
                 .header("content-type", "application/json")
                 .header(auth_header().0, auth_header().1)
-                .body(Body::from(
-                    r#"{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}],"stream":true}"#,
-                ))
+                .body(Body::from(body.to_string()))
                 .unwrap(),
         )
         .await
@@ -525,6 +528,79 @@ async fn post_stream(app: &axum::Router) -> axum::http::StatusCode {
     // accounting exactly once.
     let _ = res.into_body().collect().await.unwrap().to_bytes();
     status
+}
+
+#[tokio::test]
+async fn concurrent_requests_single_upstream_call() {
+    // R05 acceptance: 20 concurrent requests with 1 slot → 1 upstream call.
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct CountingProvider {
+        calls: AtomicUsize,
+    }
+
+    impl Provider for CountingProvider {
+        fn chat(&self, _payload: Value) -> ChatFuture {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                Ok(json!({
+                    "choices": [{"message": {"role": "assistant", "content": "Hi!"}}],
+                    "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+                }))
+            })
+        }
+        fn chat_stream(&self, _p: Value) -> fwllm_gateway::providers::StreamFuture {
+            unreachable!()
+        }
+    }
+
+    use fwllm_gateway::metering::{InMemoryStore, Metering};
+    let cfg = base_config(None);
+    let provider = Arc::new(CountingProvider { calls: AtomicUsize::new(0) });
+    let mut providers: HashMap<String, Arc<dyn Provider>> = HashMap::new();
+    providers.insert("primary".into(), provider.clone());
+    providers.insert("backup".into(), provider.clone());
+    let metering = Metering::new(Box::new(InMemoryStore::default()), &quotas(Some(1), None));
+    let app = fwllm_gateway::build_app_with_metering(
+        cfg,
+        Some(Arc::new(providers)),
+        Some(metering),
+    );
+
+    let tasks: Vec<_> = (0..20)
+        .map(|_| {
+            let app = app.clone();
+            tokio::spawn(async move {
+                app.oneshot(
+                    axum::http::Request::builder()
+                        .method("POST")
+                        .uri("/v1/chat/completions")
+                        .header("content-type", "application/json")
+                        .header(auth_header().0, auth_header().1)
+                        .body(Body::from(
+                            r#"{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}"#,
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+                .status()
+            })
+        })
+        .collect();
+    let mut oks = 0;
+    let mut limited = 0;
+    for task in tasks {
+        match task.await.unwrap() {
+            s if s == 200 => oks += 1,
+            s if s == 429 => limited += 1,
+            s => panic!("unexpected status {s}"),
+        }
+    }
+    assert_eq!(oks, 1);
+    assert_eq!(limited, 19);
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]
@@ -562,11 +638,24 @@ async fn stream_without_usage_counts_request_second_is_429() {
 
 #[tokio::test]
 async fn stream_without_usage_estimates_tokens() {
-    // "Hello!" estimates to >= 1 token, so a 1-token quota trips on retry.
+    // R05: admit reserves prompt_est + max_tokens; settle refunds the unused
+    // part. With a 10-token quota and max_tokens=10 the first stream fits
+    // (reserve 10) and settles to the "Hello!" estimate (>= 1 token), so the
+    // retry no longer fits (1 + 10 > 10).
     let provider = Arc::new(NoUsageStream { calls: Mutex::new(vec![]) });
-    let app = stream_app_with_quotas(provider, quotas(None, Some(1)));
-    assert_eq!(post_stream(&app).await, 200);
-    assert_eq!(post_stream(&app).await, 429);
+    let app = stream_app_with_quotas(provider, quotas(None, Some(10)));
+    let body = r#"{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}],"stream":true,"max_tokens":10}"#;
+    assert_eq!(post_stream_with(&app, body).await, 200);
+    assert_eq!(post_stream_with(&app, body).await, 429);
+}
+
+#[tokio::test]
+async fn admit_reserve_blocks_when_cap_exceeds_quota() {
+    // R05: the full reserve (not just the estimate) is gated at admission.
+    let provider = Arc::new(NoUsageStream { calls: Mutex::new(vec![]) });
+    let app = stream_app_with_quotas(provider, quotas(None, Some(5)));
+    let body = r#"{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}],"stream":true,"max_tokens":10}"#;
+    assert_eq!(post_stream_with(&app, body).await, 429);
 }
 
 #[tokio::test]
