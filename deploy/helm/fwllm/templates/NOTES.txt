@@ -1,0 +1,23 @@
+{{- /*
+R16: post-install notes — persistence reality check.
+*/ -}}
+Firewall LLM installed as {{ include "fwllm.fullname" . }}.
+
+{{- if .Values.persistence.enabled }}
+Persistence is ON: audit SQLite lives on
+{{- if .Values.persistence.existingClaim }}
+ pre-provisioned claim {{ .Values.persistence.existingClaim | quote }}.
+{{- else }}
+ chart-created PVC {{ include "fwllm.fullname" . }}-data.
+{{- end }}
+Verify: write an audit row, delete the pod, read the row back.
+{{- else }}
+Persistence is OFF: audit uses emptyDir and is lost with the pod.
+{{- end }}
+{{- if .Values.certs.existingSecret }}
+Certificates come from Secret {{ .Values.certs.existingSecret | quote }}.
+{{- else }}
+Dev self-signed certificates are generated into an emptyDir at startup.
+{{- end }}
+Do NOT scale replicaCount for HA: SQLite and in-memory routing state are
+single-instance (see values.yaml).

@@ -1,3 +1,7 @@
+# R16: do NOT raise this for HA. Audit is SQLite on a single volume and the
+# Rust gateway keeps routing state in memory; replicas would diverge
+# (budgets, blocks) and corrupt the database. Scale reads via separate
+# releases or wait for shared-state support.
 replicaCount: 1
 image:
   repository: fwllm-gateway
@@ -16,6 +20,11 @@ config:
   ingress:
     enabled: true
     listen: "0.0.0.0:8443"
+  # R16: audit SQLite must live on the persistent /data volume so records
+  # survive pod recreation (see persistence below).
+  audit:
+    enabled: true
+    db_path: /data/audit.db
 secret:
   # create via: kubectl create secret generic fwllm-secrets --from-literal=OPENROUTER_API_KEY=...
   create: true
@@ -27,7 +36,16 @@ redis:
 persistence:
   enabled: false
   size: 1Gi
+  accessMode: ReadWriteOnce
+  # storageClass: standard
+  # R16: use a pre-provisioned claim instead of the chart-created PVC.
+  # When set (non-empty), persistence.enabled is implied for the mount
+  # and no PVC object is rendered.
+  existingClaim: ""
 certs:
   generateSelfSigned: true
-  # existingSecret: fwllm-certs
+  # R16: name of a Secret containing server.crt, server.key and ca.crt.
+  # When set, it is mounted at /certs instead of the writable emptyDir
+  # used for gateway-generated dev certs.
+  existingSecret: ""
 resources: {}

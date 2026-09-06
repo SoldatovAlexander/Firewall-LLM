@@ -1,0 +1,21 @@
+{{- /*
+R16: the data PVC is created by the chart when persistence is enabled
+without an existing claim. With existingClaim the cluster must provide
+the PVC (e.g. shared storage provisioned out of band).
+*/ -}}
+{{- if and .Values.persistence.enabled (not .Values.persistence.existingClaim) }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "fwllm.fullname" . }}-data
+  labels: {{- include "fwllm.labels" . | nindent 4 }}
+spec:
+  accessModes:
+    - {{ .Values.persistence.accessMode | default "ReadWriteOnce" }}
+  {{- if .Values.persistence.storageClass }}
+  storageClassName: {{ .Values.persistence.storageClass | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.persistence.size }}
+{{- end }}

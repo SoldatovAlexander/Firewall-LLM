@@ -43,10 +43,37 @@ spec:
         - name: config
           configMap:
             name: {{ include "fwllm.fullname" . }}-config
+        {{/*
+            R16: certificates come from an existing Secret when configured
+            (must contain server.crt, server.key and ca.crt); otherwise a
+            writable emptyDir where the gateway generates dev self-signed
+            certs on startup.
+        */}}
         - name: certs
+          {{- if .Values.certs.existingSecret }}
+          secret:
+            secretName: {{ .Values.certs.existingSecret | quote }}
+            items:
+              - key: server.crt
+                path: server.crt
+              - key: server.key
+                path: server.key
+                mode: 0600
+              - key: ca.crt
+                path: ca.crt
+          {{- else }}
           emptyDir: {}
+          {{- end }}
+        {{/*
+            R16: audit SQLite lives on this volume, so config audit.db_path
+            must point under /data (see values config.audit.db_path).
+            Precedence: existingClaim > chart-created PVC > emptyDir.
+        */}}
         - name: data
-          {{- if .Values.persistence.enabled }}
+          {{- if .Values.persistence.existingClaim }}
+          persistentVolumeClaim:
+            claimName: {{ .Values.persistence.existingClaim | quote }}
+          {{- else if .Values.persistence.enabled }}
           persistentVolumeClaim:
             claimName: {{ include "fwllm.fullname" . }}-data
           {{- else }}
