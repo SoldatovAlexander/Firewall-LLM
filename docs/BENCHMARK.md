@@ -6,15 +6,15 @@
 
 ## Release 0.1.0 smoke (2026-09-06, dev-server, no-AVX2 CPU)
 
-Prod-like config: DLP `mask/restore` `ru_152`, injection `block` (+ML XLM-R on Python; **Rust ML off — this host lacks AVX2 required by ort prebuilt binaries**, signatures only), mock upstream, shared Redis. `scripts/bench.py`, single runs.
+Prod-like config: DLP `mask/restore` `ru_152`, injection `block` (+ML XLM-R on Python; **Rust ML off — this host lacks AVX2 required by ort prebuilt binaries**, signatures only), mock upstream, shared Redis. `scripts/bench.py`.
 
 | Load | Python chat p50/p95 | Rust chat p50/p95 | healthz p50 |
 |---|---|---|---|
 | 5 rps × 15 s | 60 / 88 ms | 23 / 75 ms | ~7 ms both |
 | 20 rps × 10 s | 789 / 1371 ms (saturating) | 21 / 29 ms (flat) | ~8 ms both |
-| 50 rps × 10 s | 2683 / 3367 ms (collapsed, all 200) | — (not re-run; flat at 20) | ~6–9 ms both |
+| 50 rps × 10 s ×3 runs | 2324 / 2570 ms med (2070–2683 / 2522–3367) | 18 / 22 ms med (flat) | ~6–10 ms both |
 
-Reading: on this hardware Python chat saturates between 5 and 20 rps (ONNX inference without AVX2 dominates); Rust stays flat to at least 20 rps. No errors at any load (all 200) — degradation is latency-only. Capacity planning must use these numbers, not the 2026-08-26 table (DLP-off, ML-off, pre-R03/R05 accounting).
+Codes at every load: all `200` (Python included) — degradation is latency-only, no errors. Reading: on this hardware Python chat saturates between 5 and 20 rps (ONNX inference without AVX2 dominates); Rust stays flat to at least 50 rps. Capacity planning must use these numbers, not the 2026-08-26 table (DLP-off, ML-off, pre-R03/R05 accounting).
 
 Hardware constraints affecting the release image: the `gateway-rust` image requires trixie glibc (ort prebuilts need ≥ 2.38) + libstdc++/libgomp at runtime (see Dockerfile); ort prebuilts additionally require AVX2 — hosts without it must set `injection.ml.enabled: false` on the Rust gateway (fail-fast aborts startup otherwise).
 
