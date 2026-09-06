@@ -18,6 +18,10 @@ docker compose up -d --build
 - Аудит: WAL + `busy_timeout`, без fsync на коммит (дешево и многопоточно; деньги — в Redis).
 - Перегрузка режется честным 429 (`server.max_inflight_requests`, по умолчанию 32 на воркер), а не очередью до таймаутов.
 
+## Бэкап аудита
+
+`scripts/backup-audit.sh <data-dir> <backup-dir> [keep-days=7]` — консистентная копия через SQLite backup API (без гонок живого файла), проверка `integrity_check`, gzip, ротация. Для cron/systemd: раз в сутки ночью.
+
 ## Что переживает рестарт (релиз 0.1.0)
 
 - **Квоты и резервы** — в Redis (daily buckets + `fwllm:rsv:*`); рестарт гейта их не сбрасывает.

@@ -18,6 +18,10 @@ docker compose up -d --build
 - Audit: WAL + `busy_timeout`, no fsync per commit (cheap and concurrent; money lives in Redis).
 - Overload is cut with an honest 429 (`server.max_inflight_requests`, default 32 per worker), not queued until timeouts.
 
+## Audit backup
+
+`scripts/backup-audit.sh <data-dir> <backup-dir> [keep-days=7]` — consistent copy via the SQLite backup API (no live-file races), `integrity_check`, gzip, rotation. For cron/systemd: once nightly.
+
 ## What survives a restart (release 0.1.0)
 
 - **Quotas and reservations** — in Redis (daily buckets + `fwllm:rsv:*`); a gateway restart does not reset them.
