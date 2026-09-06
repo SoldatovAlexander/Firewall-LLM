@@ -1,7 +1,20 @@
 use clap::Parser;
 use futures_util::{SinkExt, StreamExt};
 use http::HeaderMap;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::Request as WsRequest;
+
+/// R09: build the WebSocket handshake request via IntoClientRequest so the
+/// mandatory upgrade headers (Sec-WebSocket-Key, Upgrade, Connection,
+/// Sec-WebSocket-Version) are generated; then attach agent auth.
+pub fn build_request(url: &str, token: &str) -> anyhow::Result<WsRequest<()>> {
+    let mut request = url.into_client_request()?;
+    request.headers_mut().insert(
+        "Authorization",
+        format!("Bearer {token}").parse()?,
+    );
+    Ok(request)
+}
 
 #[derive(Parser, Debug)]
 #[command(name = "fwllm-agent")]
@@ -79,13 +92,15 @@ impl rustls::client::danger::ServerCertVerifier for NoCertificateVerification {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // R09: rustls 0.23 has no auto-selected process provider; the real
+    // binary panicked before even opening the handshake without this.
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("ring provider install");
     tracing_subscriber::fmt::init();
     let args = Args::parse();
     tracing::info!("connecting to {}", args.gateway_url);
-    let request = WsRequest::builder()
-        .uri(&args.gateway_url)
-        .header("Authorization", format!("Bearer {}", args.token))
-        .body(())?;
+    let request = build_request(&args.gateway_url, &args.token)?;
 
     let mut client_builder = reqwest::Client::builder();
     if args.insecure {
@@ -210,6 +225,18 @@ async fn forward(client: &reqwest::Client, method: &str, url: &str, frame: &serd
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn handshake_request_has_websocket_headers_and_auth() {
+        // R09: the real binary previously sent a bare HTTP request and died
+        // with "Missing, duplicated or incorrect header sec-websocket-key".
+        let req = build_request("wss://127.0.0.1:18443/ingress", "secret-token").unwrap();
+        let headers = req.headers();
+        assert!(headers.contains_key("sec-websocket-key"));
+        assert_eq!(headers.get("upgrade").unwrap(), "websocket");
+        assert_eq!(headers.get("sec-websocket-version").unwrap(), "13");
+        assert_eq!(headers.get("authorization").unwrap(), "Bearer secret-token");
+    }
 
     #[test]
     fn mask_removes_via_and_forwarded() {
