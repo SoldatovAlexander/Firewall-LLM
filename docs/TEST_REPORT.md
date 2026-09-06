@@ -38,6 +38,7 @@
 |---|---|---|
 | R01 admin-fallback | Alice≠admin матрица, пустой admin-список = запрет | ✅ |
 | R02 Rust proxy | counting-proxy, malformed URL = ошибка конфигурации | ✅ |
+| R02 live (2026-09-06) | SOCKS-зависимости обеих веток (`httpx[socks]`, reqwest `socks`) + SOCKS round-trip unit; живые чаты `gpt-4o-mini` через `single_proxy` socks5h на dev-server — 200 в обеих ветках (dev-server IP заблокирован OpenRouter напрямую 403, метод проверки: оракул `/auth/key` 401 vs 403; рабочий exit найден среди публичных SOCKS, без секретов) | ✅ |
 | R03 stream без usage | always-count, estimate + `usage_source`, `include_usage`, genuine disconnect (raw ASGI / Drop-guard) | ✅ |
 | R04 пустой choices | usage-чанк `choices: []`, null/missing choices, multi-choice | ✅ |
 | R05 TOCTOU квот | admit/settle идемпотентность, 20 конкурентных → 1 upstream (обе ветки), refund при ошибке провайдера | ✅ |
