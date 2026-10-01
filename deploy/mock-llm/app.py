@@ -1,4 +1,4 @@
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 class H(BaseHTTPRequestHandler):
     def do_POST(self):
@@ -7,4 +7,4 @@ class H(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(json.dumps({"id":"mock","object":"chat.completion","choices":[{"message":{"content":"ok"}}],"usage":{"prompt_tokens":1,"completion_tokens":1}}).encode())
     def log_message(self, *a): pass
-HTTPServer(("0.0.0.0", 8000), H).serve_forever()
+ThreadingHTTPServer(("0.0.0.0", 8000), H).serve_forever()

@@ -40,7 +40,7 @@ ingress:
   enabled: false
 
 telemetry:
-  enabled: true
+  enabled: false
   service_name: fwllm-gateway
   exporter:
     protocol: grpc

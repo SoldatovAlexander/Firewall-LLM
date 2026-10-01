@@ -68,3 +68,34 @@ KEEP_STACK=1 ./check-fail-open.sh
 This smoke test proves the availability property at deployment level. Formal
 experiment **E4** (including evidence, exporter errors and timing) is recorded
 in PR-5.
+
+
+## Formal E1–E7 experiment suite
+
+Run the complete architecture validation:
+
+```bash
+chmod +x run-experiments.sh
+./run-experiments.sh
+```
+
+Evidence is written to:
+
+```text
+artifacts/
+├── normal-trace.json
+├── security-trace.json
+├── e1-e2-e6.json
+├── e3-security.json
+├── e4-fail-open.json
+├── e5-load.json
+├── e5-docker-stats-before.json
+├── e5-docker-stats-after.json
+├── e7-enabled.json
+├── e7-disabled.json
+├── e7-performance.json
+└── EXPERIMENT_SUMMARY.md
+```
+
+Methodology and decision rules are documented in
+`docs/PROTOTYPE_OTEL_EXPERIMENTS.md`.
