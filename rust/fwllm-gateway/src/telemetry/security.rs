@@ -31,13 +31,15 @@ pub fn record_security_finding(finding: &SecurityFinding) {
         SecurityCategory::Dlp => "dlp.detected",
     };
 
+    // Keep tracing macro field identifiers Rust-friendly. The canonical
+    // dotted names live in the telemetry contract / exporter mapping layer.
     tracing::warn!(
         target: "fwllm.security",
-        fwllm.event.name = event_name,
-        security.category = attrs.category.as_str(),
-        security.rule = attrs.rule.as_str(),
-        security.severity = attrs.severity.as_str(),
-        security.action = attrs.action.as_str(),
+        event_name = event_name,
+        security_category = attrs.category.as_str(),
+        security_rule = attrs.rule.as_str(),
+        security_severity = attrs.severity.as_str(),
+        security_action = attrs.action.as_str(),
         "security finding"
     );
 }
