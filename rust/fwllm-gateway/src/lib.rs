@@ -1014,12 +1014,24 @@ async fn chat_completions(
         payload["stream_options"] = Value::Object(options);
     }
 
-    let chain_state = match state
-        .inspectors
-        .process_request_with_client(&mut payload, Some(&client_id))
-    {
-        Ok(s) => s,
+    let security_span = tracing::info_span!(
+        "fwllm.security.inspect",
+        otel.name = "fwllm.security.inspect",
+        "security.operation" = "request_inspection",
+        "security.result" = tracing::field::Empty,
+    );
+    let inspection = security_span.in_scope(|| {
+        state
+            .inspectors
+            .process_request_with_client(&mut payload, Some(&client_id))
+    });
+    let chain_state = match inspection {
+        Ok(s) => {
+            security_span.record("security.result", "clean");
+            s
+        }
         Err(e) => {
+            security_span.record("security.result", "blocked");
             metrics::observe_request(&client_id, &provider_name, &body.model, "blocked", 0.0, 0, 0);
             audit_once(
                 &state.audit, &request_id, &client_id, &provider_name, &body.model,
@@ -1110,11 +1122,29 @@ async fn chat_completions(
         "gen_ai.provider.name" = provider_name.as_str(),
         "gen_ai.request.model" = concrete_model.as_str(),
         "fwllm.provider.streaming" = false,
+        "fwllm.provider.result" = tracing::field::Empty,
+        "error.type" = tracing::field::Empty,
+        "http.response.status_code" = tracing::field::Empty,
     );
+    let provider_result_span = provider_span.clone();
     let result = provider
         .chat(payload.take())
         .instrument(provider_span)
         .await;
+    match &result {
+        Ok(_) => {
+            provider_result_span.record("fwllm.provider.result", "ok");
+        }
+        Err(providers::ProviderError::Http { status, .. }) => {
+            provider_result_span.record("fwllm.provider.result", "error");
+            provider_result_span.record("error.type", "provider_http");
+            provider_result_span.record("http.response.status_code", i64::from(*status));
+        }
+        Err(providers::ProviderError::Connection(_)) => {
+            provider_result_span.record("fwllm.provider.result", "error");
+            provider_result_span.record("error.type", "provider_connection");
+        }
+    }
     let duration = started.elapsed().as_secs_f64();
 
     match result {
