@@ -25,7 +25,7 @@ inspectors:
     restore_policy: mask
     profile: ru_152
   injection:
-    mode: off
+    mode: block
     block_severity_gte: high
 
 egress:
