@@ -32,13 +32,6 @@ fn ensure_self_signed_certs(dir: &Path, sans: &[String]) -> anyhow::Result<(Path
 #[tokio::main]
 async fn main() {
     let _ = rustls::crypto::ring::default_provider().install_default();
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
-        )
-        .init();
-
     let config_path = std::env::var("FWLLM_CONFIG").unwrap_or_else(|_| {
         eprintln!("FWLLM_CONFIG environment variable must point to a fwllm.yaml file");
         std::process::exit(1);
@@ -51,6 +44,13 @@ async fn main() {
             std::process::exit(1);
         }
     };
+    let _telemetry_runtime =
+        fwllm_gateway::telemetry::TelemetryRuntime::init(&config.telemetry)
+            .unwrap_or_else(|e| {
+                eprintln!("failed to initialize telemetry: {e}");
+                std::process::exit(1);
+            });
+
     let addr = format!("{}:{}", config.server.host, config.server.port);
     // R10: ingress listener is driven by config, not env; disabled by default flag.
     let ingress_cfg = config.ingress.clone();
