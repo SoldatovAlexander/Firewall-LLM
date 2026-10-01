@@ -31,6 +31,10 @@ ndarray = "0.17"
 axum-server = { version = "0.7", features = ["tls-rustls"] }
 tokio-util = { version = "0.7", features = ["io"] }
 rand = "0.8"
+opentelemetry = { version = "0.33", default-features = false, features = ["trace"] }
+opentelemetry_sdk = { version = "0.33", default-features = false, features = ["trace"] }
+opentelemetry-otlp = { version = "0.33", default-features = false, features = ["trace", "grpc-tonic"] }
+tracing-opentelemetry = { version = "0.34", default-features = false }
 
 [profile.release]
 lto = true

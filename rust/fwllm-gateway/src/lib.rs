@@ -9,6 +9,7 @@ pub mod providers;
 pub mod router;
 pub mod inspectors;
 pub mod state;
+pub mod telemetry;
 
 use crate::error::ApiError;
 use crate::state::AppState;
