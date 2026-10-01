@@ -212,6 +212,94 @@ Python tests      PASS
 - existing security tests не регрессируют;
 - Rust CI зелёный.
 
+## 5.1. Design freeze for PR-3
+
+Перед реализацией зафиксированы границы слоя security telemetry.
+
+### Domain model
+
+Канонический объект:
+
+```text
+SecurityFinding
+├── kind/category
+├── rule_id
+├── severity
+├── action
+├── source
+└── message_safe
+```
+
+Объект принадлежит domain/security слою и **не содержит OpenTelemetry типов**.
+
+### Event flow
+
+```text
+Inspector
+   │
+   └── SecurityFinding
+          ├── Router / runtime reaction
+          └── Telemetry adapter
+                 ├── fwllm.security.inspect span
+                 └── prompt_injection.detected event
+```
+
+Это позволяет менять observability backend, не меняя security domain.
+
+### Privacy allowlist
+
+В telemetry разрешены только заранее перечисленные security metadata:
+
+```text
+security.category
+security.rule_id
+security.severity
+security.action
+security.source
+fwllm.request.id
+gen_ai.request.model
+```
+
+Запрещены по умолчанию:
+
+```text
+raw prompt
+raw completion
+message bodies
+tool arguments/results
+secret values
+provider response body
+unsanitized exception text
+PII values
+```
+
+### Error boundary
+
+Provider/security error должен экспортироваться как нормализованный код/категория.
+Raw provider body и полный exception string не являются telemetry атрибутами.
+
+### First security vertical slice
+
+PR-3 считается доказанным, если malicious prompt проходит следующий путь:
+
+```text
+Agent
+  ↓
+fwllm.request
+  ↓
+fwllm.security.inspect
+  ↓
+prompt_injection.detected
+  ↓
+SecurityFinding(action=block)
+  ↓
+HTTP blocked response
+  ↓
+provider NOT called
+```
+
+Все элементы должны относиться к одному distributed trace.
+
 ## 6. PR-4 — Streaming + Fail-open Telemetry
 
 План:
