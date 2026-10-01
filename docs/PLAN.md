@@ -174,3 +174,17 @@ PR-1 Telemetry Foundation
 ```
 
 Этот track не заменяет основной план продукта, а проверяет архитектурную гипотезу observability/security control plane до включения её в основной release roadmap.
+
+
+### Prototype Review: GO → Pilot Hardening
+
+Formal E1–E7 experiments completed successfully except E5, which remains PARTIAL pending exporter queue/drop health metrics.
+
+Decision and evidence:
+
+```text
+docs/PROTOTYPE_OTEL_REVIEW.md
+docs/PROTOTYPE_OTEL_EXPERIMENTS.md
+```
+
+The prototype architecture is accepted for the next stage: **Pilot Hardening**.
