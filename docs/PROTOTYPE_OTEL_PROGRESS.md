@@ -235,20 +235,36 @@ SecurityFinding (domain)
 
 При блокировке `fwllm.provider.request` не создаётся, потому что provider не вызывается.
 
-## 6. PR-4 — Streaming + Fail-open Telemetry
+## 6. PR-4 — Streaming + Fail-open Telemetry — IMPLEMENTED
 
-План:
+**Branch:** `feature/otel-streaming`  
+**Pull Request:** `#4 Prototype PR-4: Streaming telemetry and fail-open smoke test`  
+**CI:** Rust clippy PASS, workspace tests PASS, Python CI PASS.
 
-- lifecycle span для SSE/streaming;
-- корректное закрытие span при:
-  - terminal chunk;
-  - upstream error;
-  - client disconnect;
-  - timeout;
-- bounded telemetry behavior;
-- Collector outage experiment;
-- telemetry exporter failure не влияет на gateway availability;
-- telemetry health counters.
+Реализовано:
+
+- `fwllm.provider.request` для streaming/SSE;
+- span создаётся как child текущего `fwllm.request`;
+- span живёт дольше handler future и удерживается body stream;
+- exact-once telemetry finalization отделён от metering/audit atomic state;
+- terminal states:
+  - `ok` — нормальный `[DONE]`;
+  - `error` — stream/open/provider error;
+  - `cancelled` — client disconnect / body Drop;
+- stream-open HTTP error экспортирует только safe type/status;
+- provider body/error text не экспортируется в telemetry attributes;
+- существующий StreamAccountant / RequestLifecycle сохранён;
+- добавлен `deploy/telemetry-prototype/check-fail-open.sh`;
+- smoke-test останавливает Collector и проверяет `/healthz` + реальный chat request.
+
+### Результат PR-4
+
+- streaming lifecycle компилируется и проходит existing streaming regression suite — **PASS**;
+- Python/deploy regression — **PASS**;
+- strict clippy — **PASS**;
+- fail-open сценарий воспроизводим — **READY FOR E4**;
+- формальный Collector outage result — **PENDING PR-5**;
+- telemetry queue/drop health instrumentation — **PENDING E5 / post-prototype**, если не потребуется для архитектурного решения.
 
 ## 7. PR-5 — Prototype Experiments E1–E7
 
