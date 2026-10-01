@@ -41,3 +41,30 @@ docker compose run --rm demo-agent
 ## Fail-open preparation
 
 Collector outage is a later formal experiment. The gateway exporter is asynchronous; the request path must not synchronously depend on Collector availability.
+
+
+## Collector outage / fail-open smoke test
+
+The prototype includes a reproducible smoke test that stops the OpenTelemetry
+Collector and then performs a real chat request through the Rust gateway.
+
+```bash
+chmod +x check-fail-open.sh
+./check-fail-open.sh
+```
+
+Expected result:
+
+```text
+PASS: gateway request path remains available with Collector stopped.
+```
+
+To keep the stack running after the test:
+
+```bash
+KEEP_STACK=1 ./check-fail-open.sh
+```
+
+This smoke test proves the availability property at deployment level. Formal
+experiment **E4** (including evidence, exporter errors and timing) is recorded
+in PR-5.
