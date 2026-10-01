@@ -400,6 +400,105 @@ fn default_db_path() -> String {
     "audit.db".to_string()
 }
 
+
+fn default_telemetry_service_name() -> String {
+    "fwllm-gateway".to_string()
+}
+
+fn default_telemetry_endpoint() -> String {
+    "http://localhost:4317".to_string()
+}
+
+fn default_telemetry_protocol() -> String {
+    "grpc".to_string()
+}
+
+fn default_telemetry_timeout_ms() -> u64 {
+    1000
+}
+
+fn default_telemetry_sampling_ratio() -> f64 {
+    1.0
+}
+
+fn default_telemetry_content_mode() -> String {
+    "metadata_only".to_string()
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct TelemetryExporterConfig {
+    #[serde(default = "default_telemetry_protocol")]
+    pub protocol: String,
+    #[serde(default = "default_telemetry_endpoint")]
+    pub endpoint: String,
+    #[serde(default = "default_telemetry_timeout_ms")]
+    pub timeout_ms: u64,
+}
+
+impl Default for TelemetryExporterConfig {
+    fn default() -> Self {
+        Self {
+            protocol: default_telemetry_protocol(),
+            endpoint: default_telemetry_endpoint(),
+            timeout_ms: default_telemetry_timeout_ms(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct TelemetryTraceConfig {
+    #[serde(default = "default_telemetry_sampling_ratio")]
+    pub sampling_ratio: f64,
+}
+
+impl Default for TelemetryTraceConfig {
+    fn default() -> Self {
+        Self {
+            sampling_ratio: default_telemetry_sampling_ratio(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct TelemetryContentConfig {
+    #[serde(default = "default_telemetry_content_mode")]
+    pub mode: String,
+}
+
+impl Default for TelemetryContentConfig {
+    fn default() -> Self {
+        Self {
+            mode: default_telemetry_content_mode(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct TelemetryConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_telemetry_service_name")]
+    pub service_name: String,
+    #[serde(default)]
+    pub exporter: TelemetryExporterConfig,
+    #[serde(default)]
+    pub traces: TelemetryTraceConfig,
+    #[serde(default)]
+    pub content: TelemetryContentConfig,
+}
+
+impl Default for TelemetryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            service_name: default_telemetry_service_name(),
+            exporter: TelemetryExporterConfig::default(),
+            traces: TelemetryTraceConfig::default(),
+            content: TelemetryContentConfig::default(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Config {
     #[serde(default)]
@@ -426,6 +525,8 @@ pub struct Config {
     pub audit: AuditConfig,
     #[serde(default)]
     pub ingress: IngressConfig,
+    #[serde(default)]
+    pub telemetry: TelemetryConfig,
 }
 
 /// Load and validate configuration from a YAML file.
@@ -537,6 +638,31 @@ pub fn load_config_from_str(raw: &str) -> Result<Config, ConfigError> {
     }
 
     let mut cfg: Config = serde_yaml::from_value(value)?;
+
+    if cfg.telemetry.enabled {
+        if cfg.telemetry.exporter.protocol != "grpc" {
+            return Err(ConfigError::Validation(format!(
+                "telemetry.exporter.protocol '{}' is unsupported in the prototype; use 'grpc'",
+                cfg.telemetry.exporter.protocol
+            )));
+        }
+        if cfg.telemetry.exporter.endpoint.trim().is_empty() {
+            return Err(ConfigError::Validation(
+                "telemetry.exporter.endpoint must not be empty".to_string(),
+            ));
+        }
+        if !(0.0..=1.0).contains(&cfg.telemetry.traces.sampling_ratio) {
+            return Err(ConfigError::Validation(
+                "telemetry.traces.sampling_ratio must be within 0..=1".to_string(),
+            ));
+        }
+        if cfg.telemetry.content.mode != "metadata_only" {
+            return Err(ConfigError::Validation(format!(
+                "telemetry.content.mode '{}' is unsupported in the prototype; use 'metadata_only'",
+                cfg.telemetry.content.mode
+            )));
+        }
+    }
 
     // R10: reject unusable ingress listen addresses at load time
     if cfg.ingress.enabled {
