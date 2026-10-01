@@ -415,6 +415,8 @@ struct StreamAccountant {
     reservation: Option<crate::metering::Reservation>,
     lifecycle: RequestLifecycle,
     stream_error: Arc<AtomicBool>,
+    provider_span: tracing::Span,
+    telemetry_finalized: Arc<AtomicBool>,
 }
 
 impl StreamAccountant {
@@ -467,6 +469,19 @@ impl StreamAccountant {
             }
         }
     }
+
+    /// Close the streaming provider span exactly once. The span itself is
+    /// created while fwllm.request is current, then kept alive by the body
+    /// stream until [DONE], stream error, or client disconnect.
+    fn finish_provider_span(&self, result: &'static str, error_type: Option<&'static str>) {
+        if self.telemetry_finalized.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        self.provider_span.record("fwllm.provider.result", result);
+        if let Some(error_type) = error_type {
+            self.provider_span.record("error.type", error_type);
+        }
+    }
 }
 
 impl Drop for StreamAccountant {
@@ -478,8 +493,10 @@ impl Drop for StreamAccountant {
         // finish or an already-audited open failure.
         let (prompt, done, source) = self.usage_numbers();
         let code = if self.stream_error.load(Ordering::SeqCst) {
+            self.finish_provider_span("error", Some("provider_stream"));
             "upstream_error"
         } else {
+            self.finish_provider_span("cancelled", None);
             "cancelled"
         };
         let response_text = self.completion_text.lock().unwrap().clone();
@@ -558,7 +575,27 @@ async fn stream_response(
     let model = model.to_string();
     // R03: request text for usage estimation when the provider sends none.
     let request_text = prompt_text(&payload);
-    match provider.chat_stream(payload).await {
+    let concrete_model = payload
+        .get("model")
+        .and_then(Value::as_str)
+        .unwrap_or(model)
+        .to_string();
+    let provider_span = tracing::info_span!(
+        "fwllm.provider.request",
+        otel.name = "fwllm.provider.request",
+        otel.kind = "client",
+        "gen_ai.provider.name" = provider_name.as_str(),
+        "gen_ai.request.model" = concrete_model.as_str(),
+        "fwllm.provider.streaming" = true,
+        "fwllm.provider.result" = tracing::field::Empty,
+        "error.type" = tracing::field::Empty,
+        "http.response.status_code" = tracing::field::Empty,
+    );
+    let stream_result = provider
+        .chat_stream(payload)
+        .instrument(provider_span.clone())
+        .await;
+    match stream_result {
         Ok(stream) => {
             use futures_util::StreamExt;
             let client = client_id.clone();
@@ -649,6 +686,8 @@ async fn stream_response(
                 reservation: reservation.clone(),
                 lifecycle: lifecycle.clone(),
                 stream_error: stream_error.clone(),
+                provider_span: provider_span.clone(),
+                telemetry_finalized: Arc::new(AtomicBool::new(false)),
             };
             let with_done = {
                 let restore_done = restore_session.clone();
@@ -681,6 +720,8 @@ async fn stream_response(
                     reservation: accountant.reservation.clone(),
                     lifecycle: accountant.lifecycle.clone(),
                     stream_error: accountant.stream_error.clone(),
+                    provider_span: accountant.provider_span.clone(),
+                    telemetry_finalized: accountant.telemetry_finalized.clone(),
                 };
                 tail.chain(futures_util::stream::once(async move {
                     // R03: always count the admitted request, even on zero
@@ -700,8 +741,10 @@ async fn stream_response(
                     // R12: a mid-stream item failure flips the terminal
                     // code — the final row is never "ok" after an error.
                     let code = if _guard.stream_error.load(Ordering::SeqCst) {
+                        _guard.finish_provider_span("error", Some("provider_stream"));
                         "upstream_error"
                     } else {
+                        _guard.finish_provider_span("ok", None);
                         "ok"
                     };
                     let response_text =
@@ -736,6 +779,16 @@ async fn stream_response(
                 .unwrap()
         }
         Err(err) => {
+            provider_span.record("fwllm.provider.result", "error");
+            match &err {
+                providers::ProviderError::Http { status, .. } => {
+                    provider_span.record("error.type", "provider_http");
+                    provider_span.record("http.response.status_code", i64::from(*status));
+                }
+                providers::ProviderError::Connection(_) => {
+                    provider_span.record("error.type", "provider_connection");
+                }
+            }
             // R12: stream open failure is audited (not just metered), and
             // the admission reserve is settled — no stream exists, so no
             // Drop guard will run for this request.
