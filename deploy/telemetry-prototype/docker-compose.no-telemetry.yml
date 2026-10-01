@@ -1,0 +1,5 @@
+services:
+  gateway-rust:
+    environment:
+      FWLLM_CONFIG: /etc/fwllm/fwllm-no-telemetry.yaml
+      RUST_LOG: info
