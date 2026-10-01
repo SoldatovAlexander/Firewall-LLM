@@ -38,6 +38,7 @@ services:
       RUST_LOG: info
     volumes:
       - ./fwllm.yaml:/etc/fwllm/fwllm.yaml:ro
+      - ./fwllm-no-telemetry.yaml:/etc/fwllm/fwllm-no-telemetry.yaml:ro
       - ./data:/data
     depends_on:
       - redis
