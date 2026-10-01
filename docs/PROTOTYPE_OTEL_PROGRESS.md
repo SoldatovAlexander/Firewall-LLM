@@ -266,33 +266,83 @@ SecurityFinding (domain)
 - формальный Collector outage result — **PENDING PR-5**;
 - telemetry queue/drop health instrumentation — **PENDING E5 / post-prototype**, если не потребуется для архитектурного решения.
 
-## 7. PR-5 — Prototype Experiments E1–E7
+## 7. PR-5 — Prototype Experiments E1–E7 — EXECUTED
 
-Формальный набор архитектурных экспериментов:
+**Branch:** `feature/otel-experiments`  
+**Pull Request:** `#5 Prototype PR-5: Formal OpenTelemetry experiments E1-E7`  
+**Workflow run:** `36930377923` — SUCCESS  
+**Evidence artifact:** `fwllm-otel-prototype-evidence`, artifact ID `11194979948`  
+**Artifact SHA-256:** `3cbe4d6496fbd5bf2cf7830535d06b9b2004600fa68a4584a343fc365d52c15a`
 
-| ID | Эксперимент | Проверяем |
+Фактические результаты:
+
+| ID | Результат | Ключевое evidence |
 |---|---|---|
-| E1 | Agent → Gateway distributed trace | W3C context continuity |
-| E2 | Provider trace | latency/provider/model correlation |
-| E3 | Security block trace | explainable security decision |
-| E4 | Collector unavailable | fail-open request path |
-| E5 | Telemetry queue/load | bounded resource behavior |
-| E6 | Privacy validation | no raw PII/secrets export |
-| E7 | Performance baseline | p50/p95/p99 overhead |
+| E1 | **PASS** | один trace содержит `fwllm-demo-agent` + `fwllm-gateway`, agent/retrieval/tool/request spans |
+| E2 | **PASS** | 2 provider spans; provider=`mock`, model=`prototype-model` |
+| E3 | **PASS** | security trace содержит `fwllm.security.inspect`, rule/severity/action; provider span отсутствует |
+| E4 | **PASS** | Collector stopped → HTTP 200, health=true, latency 22.366 ms |
+| E5 | **PARTIAL** | 1200/1200 успешных запросов, concurrency 8, gateway healthy; queue/drop boundedness не измерена |
+| E6 | **PASS** | synthetic privacy sentinel отсутствует в Jaeger JSON |
+| E7 | **PASS** | telemetry ON/OFF baseline воспроизводимо измерен |
 
-Результат каждого эксперимента фиксируется как:
+### E5 фактические числа
 
 ```text
-PASS / PARTIAL / FAIL
-Evidence
-Observed limitation
-Decision
-Follow-up
+requests        1200
+concurrency     8
+successes       1200
+gateway health  true
+elapsed         1.987 s
+throughput      604.023 req/s
+p50             12.475 ms
+p95             16.097 ms
+p99             18.475 ms
 ```
 
-## 8. Prototype Review Gate
+Статус остаётся **PARTIAL**, потому что survival под нагрузкой не доказывает bounded exporter queue / dropped spans / memory pressure.
 
-После PR-5 проводится решение:
+### E7 фактические числа
+
+Telemetry enabled:
+
+```text
+mean  3.840 ms
+p50   3.784 ms
+p95   3.997 ms
+p99   4.154 ms
+```
+
+Telemetry disabled:
+
+```text
+mean  3.927 ms
+p50   3.859 ms
+p95   4.246 ms
+p99   4.822 ms
+```
+
+Полученные отрицательные delta не трактуются как «telemetry ускоряет gateway». Разница находится в области шума короткого synthetic benchmark. Корректный вывод: **в этом prototype-run измеримого latency regression не обнаружено**; production/pilot threshold должен определяться повторными измерениями на реалистичной нагрузке.
+
+Полная методика: `docs/PROTOTYPE_OTEL_EXPERIMENTS.md`.
+
+## 8. Prototype Review Gate — DECISION RECORDED
+
+### Решение: **GO → Pilot Hardening**
+
+Prototype подтвердил основную архитектурную гипотезу:
+
+- distributed trace между agent и gateway работает;
+- provider execution коррелируется;
+- security decision объясним в том же trace;
+- blocked security request не достигает provider;
+- Collector не является synchronous dependency request path;
+- metadata-only не экспортировал synthetic sensitive sentinel;
+- synthetic performance baseline не показал измеримого regression.
+
+Это **не** означает production-ready. Перед pilot необходимо закрыть E5 hardening gap и повторить performance/resilience tests на более реалистичной нагрузке.
+
+После PR-5 критерии решения интерпретируются так:
 
 ### GO
 
@@ -348,8 +398,12 @@ PR-1 и PR-2 подтверждают техническую основу:
 
 > Firewall-LLM способен связать agent-side execution и gateway/provider execution в один distributed trace.
 
-PR-3 должен подтвердить ключевой differentiator:
+PR-3 и формальный E3 подтвердили ключевой differentiator:
 
 > Firewall-LLM способен не только показать, что агент вызвал LLM, но и объяснить, какое security-событие произошло, какое решение было принято и почему выполнение было заблокировано — в рамках того же trace.
 
-Это и есть переход от обычного observability gateway к **Secure Agent Observability Gateway**.
+PR-5 дополнительно подтвердил fail-open request path и metadata-only privacy property.
+
+Итог prototype-track:
+
+> **Архитектура Secure Agent Observability Gateway подтверждена для перехода в Pilot Hardening.**
