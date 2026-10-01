@@ -578,7 +578,7 @@ async fn stream_response(
     let concrete_model = payload
         .get("model")
         .and_then(Value::as_str)
-        .unwrap_or(model)
+        .unwrap_or(model.as_str())
         .to_string();
     let provider_span = tracing::info_span!(
         "fwllm.provider.request",
