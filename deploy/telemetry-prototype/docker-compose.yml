@@ -1,0 +1,58 @@
+services:
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+
+  mock-llm:
+    build:
+      context: ../mock-llm
+    restart: unless-stopped
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.62.0
+    restart: unless-stopped
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "16686:16686"
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.111.0
+    restart: unless-stopped
+    command: ["--config=/etc/otelcol-contrib/config.yaml"]
+    volumes:
+      - ./otel-collector.yaml:/etc/otelcol-contrib/config.yaml:ro
+    depends_on:
+      - jaeger
+    ports:
+      - "4317:4317"
+      - "4318:4318"
+
+  gateway-rust:
+    build:
+      context: ../..
+      dockerfile: rust/fwllm-gateway/Dockerfile
+    restart: unless-stopped
+    environment:
+      FWLLM_CONFIG: /etc/fwllm/fwllm.yaml
+      RUST_LOG: info
+    volumes:
+      - ./fwllm.yaml:/etc/fwllm/fwllm.yaml:ro
+      - ./data:/data
+    depends_on:
+      - redis
+      - mock-llm
+      - otel-collector
+    ports:
+      - "8081:8080"
+
+  demo-agent:
+    build:
+      context: ../../examples/telemetry-demo-agent
+    environment:
+      FWLLM_URL: http://gateway-rust:8080/v1/chat/completions
+      FWLLM_TOKEN: prototype-token
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+    depends_on:
+      - gateway-rust
+      - otel-collector

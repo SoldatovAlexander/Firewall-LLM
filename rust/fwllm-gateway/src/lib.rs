@@ -29,6 +29,7 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 use std::time::Instant;
+use tracing::Instrument;
 
 /// R12: unified per-request lifecycle — exactly one final audit row for
 /// every terminal outcome (JSON/SSE success, block, quota, upstream error,
@@ -149,7 +150,11 @@ pub fn build_app_full(
     let state = AppState::build(config, providers, metering, audit);
     let router = Router::new()
         .route("/healthz", get(healthz))
-        .route("/v1/chat/completions", post(chat_completions))
+        .route(
+            "/v1/chat/completions",
+            post(chat_completions)
+                .layer(axum::middleware::from_fn(telemetry::trace_chat_request)),
+        )
         .route("/admin/audit", get(admin_audit))
         .route("/admin/ingress/tokens", post(create_ingress_token))
         .route("/admin/ingress/agents", get(list_ingress_agents))
@@ -855,6 +860,13 @@ async fn chat_completions(
 
     // R12: every request carries an id through to its single final audit row.
     let request_id = new_request_id();
+
+    // Prototype telemetry: record metadata-only request attributes on the
+    // middleware-created fwllm.request span. Never record message content here.
+    let request_span = tracing::Span::current();
+    request_span.record("fwllm.request.id", request_id.as_str());
+    request_span.record("gen_ai.request.model", body.model.as_str());
+    request_span.record("fwllm.stream", body.stream);
     let unrouted_messages =
         serde_json::to_string(&serde_json::json!(&body.messages)).unwrap_or_default();
 
@@ -1091,7 +1103,18 @@ async fn chat_completions(
             .await;
     }
 
-    let result = provider.chat(payload.take()).await;
+    let provider_span = tracing::info_span!(
+        "fwllm.provider.request",
+        otel.name = "fwllm.provider.request",
+        otel.kind = "client",
+        "gen_ai.provider.name" = provider_name.as_str(),
+        "gen_ai.request.model" = concrete_model.as_str(),
+        "fwllm.provider.streaming" = false,
+    );
+    let result = provider
+        .chat(payload.take())
+        .instrument(provider_span)
+        .await;
     let duration = started.elapsed().as_secs_f64();
 
     match result {

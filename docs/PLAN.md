@@ -148,3 +148,29 @@ FastAPI TestClient/httpx ASGI, Docker Compose (Prometheus, Grafana, Redis).
 - **M2** (фазы 3–4): учёт токенов + дашборд в Grafana на dev-server
 - **M3** (фазы 5–6): безопасность (DLP/injection) + прокси-пул
 - **M4** (фазы 7–8): автопереключение и аудит — MVP закрыт
+
+
+---
+
+## Prototype-track: AI Control Plane / OpenTelemetry
+
+Отдельный архитектурный prototype-track развивает Firewall-LLM от security gateway к **Secure Agent Observability Gateway** и далее к AI Control Plane.
+
+Текущий прогресс, принятые решения, stacked PR, acceptance criteria и Prototype Review Gate зафиксированы в:
+
+```text
+docs/PROTOTYPE_OTEL_PROGRESS.md
+```
+
+Порядок prototype-инкрементов:
+
+```text
+PR-1 Telemetry Foundation
+→ PR-2 First End-to-End Trace
+→ PR-3 Security & Sanitization
+→ PR-4 Streaming & Fail-open
+→ PR-5 Formal Prototype Experiments
+→ GO / REWORK / NO-GO
+```
+
+Этот track не заменяет основной план продукта, а проверяет архитектурную гипотезу observability/security control plane до включения её в основной release roadmap.
