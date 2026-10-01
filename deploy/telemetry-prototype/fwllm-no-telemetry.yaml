@@ -1,0 +1,52 @@
+server:
+  host: 0.0.0.0
+  port: 8080
+  request_timeout_seconds: 15
+
+redis_url: redis://redis:6379/0
+
+clients:
+  prototype-token: demo-agent
+
+providers:
+  mock:
+    type: openai_compat
+    base_url: http://mock-llm:8000/v1
+
+routing:
+  state_store: memory
+  default_chain: [mock]
+  attack_failover:
+    enabled: false
+
+inspectors:
+  dlp:
+    mode: off
+    restore_policy: mask
+    profile: ru_152
+  injection:
+    mode: block
+    block_severity_gte: high
+
+egress:
+  mode: direct
+
+audit:
+  enabled: false
+  db_path: /data/audit.db
+  dlp_redact: true
+
+ingress:
+  enabled: false
+
+telemetry:
+  enabled: false
+  service_name: fwllm-gateway
+  exporter:
+    protocol: grpc
+    endpoint: http://otel-collector:4317
+    timeout_ms: 1000
+  traces:
+    sampling_ratio: 1.0
+  content:
+    mode: metadata_only
