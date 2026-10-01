@@ -1,6 +1,7 @@
 use crate::error::ApiError;
 use fwllm_core::config::InspectorsConfig;
 use super::dlp::{DlpState, sanitize, deanonymize};
+use super::finding::{SecurityAction, SecurityFinding};
 use super::injection::{scan, verdict};
 use super::ml::MlInjectionInspector;
 use std::collections::HashMap;
@@ -10,7 +11,7 @@ pub struct ChainState {
     pub dlp: DlpState,
 }
 
-type PublishCallback = std::sync::Arc<dyn Fn(String, String, String) + Send + Sync>;
+type PublishCallback = std::sync::Arc<dyn Fn(SecurityFinding) + Send + Sync>;
 
 pub struct InspectorChain {
     cfg: InspectorsConfig,
@@ -40,7 +41,7 @@ impl InspectorChain {
 
     pub fn set_publish<F>(&mut self, f: F)
     where
-        F: Fn(String, String, String) + Send + Sync + 'static,
+        F: Fn(SecurityFinding) + Send + Sync + 'static,
     {
         self.publish = Some(std::sync::Arc::new(f));
     }
@@ -77,14 +78,25 @@ impl InspectorChain {
                 }
             }
             if let Some((rule, severity)) = verdict(&all_findings, &self.cfg.injection.block_severity_gte) {
+                let action = if self.cfg.injection.mode == "block" {
+                    SecurityAction::Block
+                } else {
+                    SecurityAction::Observe
+                };
+                let finding =
+                    SecurityFinding::prompt_injection(rule, severity, action, client_id);
                 if let Some(publish) = &self.publish {
-                    publish(severity.to_string(), rule.to_string(), client_id.unwrap_or("").to_string());
+                    publish(finding);
                 }
                 if self.cfg.injection.mode == "block" {
-                    return Err(ApiError::blocked(format!("prompt injection detected ({rule}, severity={severity})"), "injection"));
+                    return Err(ApiError::blocked(
+                        format!("prompt injection detected ({rule}, severity={severity})"),
+                        "injection",
+                    ));
                 }
             }
         }
+
         // 2. dlp
         let mut vault = HashMap::new();
         let mut scope = HashMap::new();

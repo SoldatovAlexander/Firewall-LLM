@@ -120,17 +120,22 @@ impl AppState {
                 .unwrap_or_else(|e| panic!("failed to build inspectors: {e}"));
         {
             let router_clone = router.clone();
-            inspectors_chain.set_publish(move |severity, _rule, client_id| {
+            inspectors_chain.set_publish(move |finding| {
+                // Composite sink: telemetry receives the allowlisted security
+                // view while routing consumes the domain finding.
+                crate::telemetry::record_security_finding(&finding);
+
                 let router = router_clone.clone();
-                let severity = severity.clone();
-                let client_id = client_id.clone();
-                // Try to spawn on current runtime, otherwise block
+                let severity = finding.severity.clone();
+                let client_id = finding.client_id.clone().unwrap_or_default();
+
+                // Try to spawn on current runtime, otherwise block.
                 if let Ok(handle) = tokio::runtime::Handle::try_current() {
                     handle.spawn(async move {
                         router.lock().await.on_attack_detected(&severity, &client_id);
                     });
                 } else {
-                    // For tests without runtime, use blocking
+                    // For tests without runtime, use blocking.
                     let rt = tokio::runtime::Builder::new_current_thread()
                         .enable_all()
                         .build()

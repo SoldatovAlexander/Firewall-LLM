@@ -1,10 +1,12 @@
 //! OpenTelemetry prototype integration.
 //!
-//! This module is intentionally infrastructure-only: domain modules do not
-//! depend on OpenTelemetry. Request spans are added in later prototype PRs.
+//! Domain modules stay independent of OpenTelemetry. This module adapts
+//! request/security domain events to tracing/OTLP.
 
 mod context;
 mod runtime;
+mod security;
 
 pub use context::{extract_parent, trace_chat_request};
 pub use runtime::{TelemetryInitError, TelemetryRuntime};
+pub use security::record_security_finding;
