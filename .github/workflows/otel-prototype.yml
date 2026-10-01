@@ -1,0 +1,54 @@
+name: OTel Prototype Experiments
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "deploy/telemetry-prototype/**"
+      - "examples/telemetry-demo-agent/**"
+      - "deploy/mock-llm/**"
+      - "rust/**"
+      - ".github/workflows/otel-prototype.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  prototype-experiments:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Docker versions
+        run: |
+          docker --version
+          docker compose version
+
+      - name: Run E1-E7 prototype experiments
+        run: |
+          chmod +x deploy/telemetry-prototype/run-experiments.sh
+          chmod +x deploy/telemetry-prototype/check-fail-open.sh
+          deploy/telemetry-prototype/run-experiments.sh
+
+      - name: Upload experiment evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fwllm-otel-prototype-evidence
+          path: deploy/telemetry-prototype/artifacts/
+          if-no-files-found: warn
+
+      - name: Prototype container logs
+        if: failure()
+        run: |
+          docker compose             -f deploy/telemetry-prototype/docker-compose.yml             logs --no-color --tail=300 || true
+
+      - name: Cleanup
+        if: always()
+        run: |
+          docker compose             -f deploy/telemetry-prototype/docker-compose.yml             down -v || true
