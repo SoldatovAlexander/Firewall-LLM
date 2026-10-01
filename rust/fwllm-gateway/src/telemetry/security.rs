@@ -33,11 +33,11 @@ pub fn record_security_finding(finding: &SecurityFinding) {
 
     tracing::warn!(
         target: "fwllm.security",
-        "fwllm.event.name" = event_name,
-        "security.category" = attrs.category.as_str(),
-        "security.rule" = attrs.rule.as_str(),
-        "security.severity" = attrs.severity.as_str(),
-        "security.action" = attrs.action.as_str(),
+        fwllm.event.name = event_name,
+        security.category = attrs.category.as_str(),
+        security.rule = attrs.rule.as_str(),
+        security.severity = attrs.severity.as_str(),
+        security.action = attrs.action.as_str(),
         "security finding"
     );
 }
