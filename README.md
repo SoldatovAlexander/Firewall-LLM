@@ -64,6 +64,8 @@ cd ../../rust && cargo test --workspace && cargo clippy -- -D warnings
 
 EN: [`docs/en/README.md`](docs/en/README.md) · RU: [`docs/ru/README.md`](docs/ru/README.md)
 
+**Подробное описание продукта (возможности, полный конфиг, сценарии):** [`docs/ru/PRODUCT.md`](docs/ru/PRODUCT.md)
+
 | Module | EN | RU |
 |--------|----|----|
 | Gateway | [en/gateway.md](docs/en/gateway.md) | [ru/gateway.md](docs/ru/gateway.md) |
