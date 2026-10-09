@@ -160,13 +160,17 @@ Python tests      PASS
 - Shadow AI discovery;
 - Kill Switch / Quarantine.
 
-## 5. PR-3 — Security & Sanitization
+## 5. PR-3 — Security & Sanitization — IMPLEMENTED
+
+**Branch:** `feature/otel-security`  
+**Pull Request:** `#3 Prototype PR-3: Security findings and trace semantics`  
+**CI:** Rust clippy PASS, workspace tests PASS.
 
 Цель:
 
 > превратить distributed trace из обычного observability trace в объяснимый security trace Firewall-LLM.
 
-План:
+Реализовано:
 
 1. Ввести typed domain model `SecurityFinding`.
 2. Убрать callback с неструктурированными `String` параметрами.
@@ -201,16 +205,35 @@ Python tests      PASS
     provider NOT called
     ```
 
-### Acceptance criteria PR-3
+### Acceptance criteria PR-3 — результат
 
-- security finding является domain object, а не OTel-specific struct;
-- router продолжает получать attack signal;
-- blocked request не вызывает provider;
-- telemetry содержит rule/severity/action;
-- telemetry не содержит raw prompt;
-- блокировка видна в том же trace;
-- existing security tests не регрессируют;
-- Rust CI зелёный.
+- security finding является domain object, а не OTel-specific struct — **PASS**;
+- router продолжает получать attack signal через composite sink — **PASS**;
+- blocked request не вызывает provider — **PASS**;
+- telemetry allowlist содержит category/rule/severity/action — **PASS**;
+- client ID, raw prompt, completion и secrets не входят в security telemetry attributes — **PASS**;
+- security inspection выполняется внутри `fwllm.security.inspect` — **PASS**;
+- provider telemetry содержит только безопасные error type/status, без provider body — **PASS**;
+- existing security tests не регрессируют — **PASS**;
+- Rust clippy/test CI — **PASS**.
+
+### Фактическая схема PR-3
+
+```text
+Security detector
+      ↓
+SecurityFinding (domain)
+      ├── Router reaction
+      └── Telemetry adapter
+             ↓
+       fwllm.security.inspect
+             ↓
+       prompt_injection.detected
+             ↓
+         action=block
+```
+
+При блокировке `fwllm.provider.request` не создаётся, потому что provider не вызывается.
 
 ## 5.1. Design freeze for PR-3
 
